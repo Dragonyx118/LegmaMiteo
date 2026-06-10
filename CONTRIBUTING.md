@@ -74,7 +74,7 @@ Open an issue with the label `enhancement` and describe:
 ### 1. Fork and clone
 
 ```bash
-git clone https://github.com/YOUR_USERNAME/LegmaMiteo.git
+git clone https://github.com/Dragonyx118/LegmaMiteo.git
 cd LegmaMiteo
 ```
 
