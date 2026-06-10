@@ -1,0 +1,77 @@
+# ===========================================
+# Docker Compose — LegmaMiteo Server
+# OpenWeather Station
+# ===========================================
+
+services:
+
+  # --- MQTT Broker ---
+  mosquitto:
+    image: eclipse-mosquitto:2
+    container_name: legmamiteo-mosquitto
+    ports:
+      - "1883:1883"
+      # - "1884:1884"  # Future LoRaWAN port
+    volumes:
+      - ./mosquitto/config:/mosquitto/config
+      - ./mosquitto/data:/mosquitto/data
+      - ./mosquitto/log:/mosquitto/log
+    restart: unless-stopped
+    networks:
+      - legmamiteo-network
+
+  # --- Time Series Database ---
+  influxdb:
+    image: influxdb:2.7
+    container_name: legmamiteo-influxdb
+    ports:
+      - "8086:8086"
+    volumes:
+      - ./influxdb:/var/lib/influxdb2
+    environment:
+      - DOCKER_INFLUXDB_INIT_MODE=setup
+      - DOCKER_INFLUXDB_INIT_USERNAME=admin
+      - DOCKER_INFLUXDB_INIT_PASSWORD=legmamiteo123
+      - DOCKER_INFLUXDB_INIT_ORG=legmamiteo
+      - DOCKER_INFLUXDB_INIT_BUCKET=stations
+      - DOCKER_INFLUXDB_INIT_RETENTION=0
+    restart: unless-stopped
+    networks:
+      - legmamiteo-network
+
+  # --- MQTT to InfluxDB Bridge ---
+  telegraf:
+    image: telegraf:1.30
+    container_name: legmamiteo-telegraf
+    depends_on:
+      - mosquitto
+      - influxdb
+    volumes:
+      - ./telegraf/telegraf.conf:/etc/telegraf/telegraf.conf:ro
+    environment:
+      - INFLUX_TOKEN=${INFLUX_TOKEN}
+    restart: unless-stopped
+    networks:
+      - legmamiteo-network
+
+  # --- Dashboard ---
+  grafana:
+    image: grafana/grafana:10.4.0
+    container_name: legmamiteo-grafana
+    ports:
+      - "3000:3000"
+    volumes:
+      - ./grafana:/var/lib/grafana
+    environment:
+      - GF_SECURITY_ADMIN_USER=admin
+      - GF_SECURITY_ADMIN_PASSWORD=legmamiteo123
+      - GF_USERS_ALLOW_SIGN_UP=false
+    depends_on:
+      - influxdb
+    restart: unless-stopped
+    networks:
+      - legmamiteo-network
+
+networks:
+  legmamiteo-network:
+    name: legmamiteo-network
