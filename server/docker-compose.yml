@@ -72,6 +72,23 @@ services:
     networks:
       - legmamiteo-network
 
+  # --- REST API Backend ---
+  api:
+    build:
+      context: ../backend
+      dockerfile: Dockerfile
+    container_name: legmamiteo-api
+    ports:
+      - "8000:8000"
+    env_file:
+      - .env
+    depends_on:
+      - influxdb
+      - mosquitto
+    restart: unless-stopped
+    networks:
+      - legmamiteo-network
+
 networks:
   legmamiteo-network:
     name: legmamiteo-network
