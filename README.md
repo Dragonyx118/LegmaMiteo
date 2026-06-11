@@ -1,7 +1,7 @@
 # 🌤️ LegmaMiteo — OpenWeather Station
 
 [![Hippocratic License HL3-CL-ECO-LAW-MIL-SV](https://img.shields.io/static/v1?label=Hippocratic%20License&message=HL3-CL-ECO-LAW-MIL-SV&labelColor=5e2751&color=bc8c3d&style=for-the-badge)](https://firstdonoharm.dev/version/3/0/cl-eco-law-mil-sv.html)
-![Hardware](https://img.shields.io/badge/ESP32--S3-Espressif-E7352C?style=for-the-badge&logo=espressif&logoColor=white)
+![Hardware](https://img.shields.io/badge/ESP32--S3-Espressif-E7352C?style=plastic&logo=espressif&logoColor=white)
 ![Connectivity](https://img.shields.io/badge/WiFi_%7C_LoRa-Connected-0088CC?style=for-the-badge&logo=wifi&logoColor=white)
 ![Power](https://img.shields.io/badge/Solar_Powered-Autonomous-FFB300?style=for-the-badge&logo=solus&logoColor=white)
 ![Cost](https://img.shields.io/badge/Cost-under_€200-2ECC71?style=for-the-badge&logo=monero&logoColor=white)
