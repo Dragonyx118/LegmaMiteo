@@ -15,6 +15,8 @@ const char* MQTT_HOST     = "192.168.137.1";  // es. 192.168.1.100
 const int   MQTT_PORT     = 1883;
 const char* STATION_ID    = "station-001";
 const int   SEND_INTERVAL = 30000; // ms tra un invio e l'altro
+const char* MQTT_USER = "station-esp32";
+const char* MQTT_PASSWORD = "LegmaMiteo2026!";
 
 // --- Oggetti ---
 WiFiClient wifiClient;
@@ -35,10 +37,13 @@ void connectWifi() {
 void connectMqtt() {
   while (!mqtt.connected()) {
     Serial.print("Connessione MQTT...");
-    if (mqtt.connect(STATION_ID)) {
+
+    if (mqtt.connect(STATION_ID, MQTT_USER, MQTT_PASSWORD)) {
       Serial.println("OK");
     } else {
-      Serial.println("Fallita, retry tra 5s");
+      Serial.print("Fallita, errore=");
+      Serial.print(mqtt.state());
+      Serial.println(" retry tra 5s");
       delay(5000);
     }
   }
