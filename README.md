@@ -1,16 +1,16 @@
 # 🌤️ LegmaMiteo — OpenWeather Station
 
-[![Hippocratic License HL3-CL-ECO-LAW-MIL-SV](https://img.shields.io/static/v1?label=Hippocratic%20License&message=HL3-CL-ECO-LAW-MIL-SV&labelColor=5e2751&color=bc8c3d&style=for-the-badge)](https://firstdonoharm.dev/version/3/0/cl-eco-law-mil-sv.html)
-![Hardware](https://img.shields.io/badge/ESP32--S3-Espressif-E7352C?style=for-the-badge&logo=espressif&logoColor=white)
-![Connectivity](https://img.shields.io/badge/WiFi_%7C_LoRa-Connected-0088CC?style=for-the-badge&logo=wifi&logoColor=white)
-![Power](https://img.shields.io/badge/Solar_Powered-Autonomous-FFB300?style=for-the-badge&logo=solus&logoColor=white)
-![Cost](https://img.shields.io/badge/Cost-under_€200-2ECC71?style=for-the-badge&logo=monero&logoColor=white)
-![Platform](https://img.shields.io/badge/Docker-Containerized-2496ED?style=for-the-badge&logo=docker&logoColor=white)
-![DB](https://img.shields.io/badge/InfluxDB-Time--Series-22ADF6?style=for-the-badge&logo=influxdb&logoColor=white)
-![Dashboard](https://img.shields.io/badge/Grafana-Dashboard-F46800?style=for-the-badge&logo=grafana&logoColor=white)
-![Protocol](https://img.shields.io/badge/MQTT-Protocol-660066?style=for-the-badge&logo=eclipse-mosquitto&logoColor=white)
-![GitHub](https://img.shields.io/badge/GitHub-Dragonyx-181717?style=for-the-badge&logo=github&logoColor=white)
-![Status](https://img.shields.io/badge/Status-WIP-E74C3C?style=for-the-badge&logo=git&logoColor=white)
+[![Hippocratic License HL3-CL-ECO-LAW-MIL-SV](https://img.shields.io/static/v1?label=Hippocratic%20License&message=HL3-CL-ECO-LAW-MIL-SV&labelColor=5e2751&color=bc8c3d&Style=flat)](https://firstdonoharm.dev/version/3/0/cl-eco-law-mil-sv.html)
+![Hardware](https://img.shields.io/badge/ESP32--S3-Espressif-E7352C?style=flat&logo=espressif&logoColor=white)
+![Connectivity](https://img.shields.io/badge/WiFi_%7C_LoRa-Connected-0088CC?Style=flat&logo=wifi&logoColor=white)
+![Power](https://img.shields.io/badge/Solar_Powered-Autonomous-FFB300?Style=flat&logo=solus&logoColor=white)
+![Cost](https://img.shields.io/badge/Cost-under_€200-2ECC71?Style=flat&logo=monero&logoColor=white)
+![Platform](https://img.shields.io/badge/Docker-Containerized-2496ED?Style=flat&logo=docker&logoColor=white)
+![DB](https://img.shields.io/badge/InfluxDB-Time--Series-22ADF6?Style=flat&logo=influxdb&logoColor=white)
+![Dashboard](https://img.shields.io/badge/Grafana-Dashboard-F46800?Style=flat&logo=grafana&logoColor=white)
+![Protocol](https://img.shields.io/badge/MQTT-Protocol-660066?Style=flat&logo=eclipse-mosquitto&logoColor=white)
+![GitHub](https://img.shields.io/badge/GitHub-Dragonyx-181717?Style=flat&logo=github&logoColor=white)
+![Status](https://img.shields.io/badge/Status-WIP-E74C3C?Style=flat&logo=git&logoColor=white)
 
 An open-source, modular, and scalable weather station network designed for
 real-time climate monitoring. Built with affordability and replicability in
