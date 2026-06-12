@@ -21,7 +21,7 @@ def get_latest(station_id: str, module: str = "base"):
 
     query = f'''
     from(bucket: "{INFLUX_BUCKET}")
-      |> range(start: -1h)
+      |> range(start: -30d)
       |> filter(fn: (r) => r._measurement == "weather_station")
       |> filter(fn: (r) => r.topic == "station/{station_id}/{module}")
       |> last()
