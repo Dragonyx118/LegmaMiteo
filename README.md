@@ -102,11 +102,69 @@ waterproof SP13 IP68 8-pin connector with the following pinout:
 
 ## 💻 Server Stack
 
-- **MQTT Broker**: Mosquitto
+- **MQTT Broker**: Mosquitto (with password authentication)
 - **Time-series DB**: InfluxDB 2.x
 - **Visualization**: Grafana
 - **Bridge**: Telegraf
+- **REST API**: FastAPI (Python)
 - **All containerized**: Docker Compose
+
+---
+
+## 🌐 REST API
+
+The public REST API exposes real-time and historical data from all stations.
+
+**Base URL**: `http://localhost:8000` (or your Cloudflare tunnel URL)
+
+| Endpoint | Description |
+|----------|-------------|
+| `GET /` | API info |
+| `GET /health` | Health check |
+| `GET /stations/` | List all active stations |
+| `GET /stations/{id}` | Station metadata |
+| `GET /data/{id}/latest?module=base` | Latest reading from a station |
+| `GET /data/{id}/history?field=temperature&range_hours=24` | Historical data |
+| `GET /data/{id}/alerts` | Active alert conditions |
+
+**Example — latest data from station-001:**
+```bash
+curl http://localhost:8000/data/station-001/latest
+```
+```json
+{
+  "success": true,
+  "station_id": "station-001",
+  "module": "base",
+  "data": {
+    "temperature": 29.7,
+    "humidity": 61.8,
+    "pressure": 1017.6,
+    "lux": 63261.0,
+    "wind_speed": 29.2,
+    "wind_direction": 51.0,
+    "rain_mm": 1.2
+  }
+}
+```
+
+Full interactive documentation at `/docs` (Swagger UI).
+
+Data is released under **CC BY-NC 4.0**. AI/ML training use is prohibited without explicit written permission.
+
+---
+
+## 🔔 Alert System
+
+Grafana-based alerting with Telegram notifications. Active alert rules:
+
+| Alert | Condition | Severity |
+|-------|-----------|----------|
+| 🌡️ High Temperature | temperature > 35°C | Warning |
+| 😷 Critical PM2.5 | pm25 > 55 µg/m³ (WHO threshold) | Critical |
+| 🏭 High CO2 | co2 > 1000 ppm | Warning |
+| ⚡ Lightning Nearby | lightning_distance < 10 km | Critical (immediate) |
+| 🌩️ Rapid Pressure Drop | pressure drop > 3 hPa / 30 min | Warning (storm incoming) |
 
 ---
 
