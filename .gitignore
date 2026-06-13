@@ -72,5 +72,7 @@ Testing/
 server/.env
 server/influxdb/*
 server/grafana/*
+!server/grafana/dashboards/
+!server/grafana/dashboards/**
 server/mosquitto/data/*
 server/mosquitto/log/*
