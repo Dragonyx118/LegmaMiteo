@@ -28,7 +28,7 @@ const char* MQTT_USER     = "station-esp32";
 const char* MQTT_PASSWORD = "LegmaMiteo2026!";
 
 // Server NTP per l'orario esatto
-const char* NTP_SERVER    = "pool.ntp.org";
+const char* NTP_SERVER    = "time.google.com";
 const long  GMT_OFFSET_SEC = 3600;        // Italia: UTC+1
 const int   DAYLIGHT_OFFSET_SEC = 3600;   // Ora legale attivata
 
@@ -59,7 +59,7 @@ String getTimestamp() {
   return String(timeStringBuff);
 }
 
-// --- Connessione Wi-Fi asincrona con attesa NTP ---
+// --- Connessione Wi-Fi asincrona con attesa NTP controllata ---
 void connectWifi() {
   if (WiFi.status() == WL_CONNECTED) return;
 
@@ -79,25 +79,24 @@ void connectWifi() {
     if (!timeSynchronized) {
       configTime(GMT_OFFSET_SEC, DAYLIGHT_OFFSET_SEC, NTP_SERVER);
       
-      // --- MODIFICA OPZIONE 1: Attesa attiva del server NTP ---
       Serial.print("[TIME] Sincronizzazione orario con NTP in corso...");
       struct tm timeinfo;
       int ntpAttempts = 0;
       
-      // Attende che getLocalTime restituisca true (max 5 secondi di timeout)
-      while (!getLocalTime(&timeinfo) && ntpAttempts < 10) {
+      // Tenta la sincronizzazione per massimo 10 secondi (20 * 500ms)
+      while (!getLocalTime(&timeinfo) && ntpAttempts < 20) {
         delay(500);
         Serial.print(".");
         ntpAttempts++;
       }
       
-      if (ntpAttempts < 10) {
+      if (ntpAttempts < 20) {
         Serial.println("\n[TIME] Orologio interno sincronizzato con successo!");
         timeSynchronized = true;
       } else {
-        Serial.println("\n[TIME] Errore: Timeout sincronizzazione NTP. Server non raggiungibile.");
+        // Se fallisce, non blocca l'ESP32: va avanti e ci riproverà più tardi
+        Serial.println("\n[TIME] ATTENZIONE: Timeout NTP. Connessione internet assente o bloccata dal Firewall.");
       }
-      // --------------------------------------------------------
     }
   } else {
     Serial.println("\n[WiFi] Rete offline. Uso la scheda SD.");
