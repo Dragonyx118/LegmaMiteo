@@ -17,15 +17,8 @@
 #include <SPI.h>
 #include <SD.h>
 #include "time.h"
+#include "secrets.h"
 
-// --- Configurazione Rete e MQTT ---
-const char* WIFI_SSID     = "LAPTOP1234";
-const char* WIFI_PASSWORD = "12345678";
-const char* MQTT_HOST     = "192.168.137.1";
-const int   MQTT_PORT     = 1883;
-const char* STATION_ID    = "station-001";
-const char* MQTT_USER     = "station-esp32";
-const char* MQTT_PASSWORD = "LegmaMiteo2026!";
 
 // Server NTP per l'orario esatto
 const char* NTP_SERVER    = "time.google.com";

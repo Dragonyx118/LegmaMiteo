@@ -24,7 +24,7 @@
     {
       "datasource": {
         "type": "influxdb",
-        "uid": "bfopgliqc93wgd"
+        "uid": "bfppqcas4iewwc"
       },
       "fieldConfig": {
         "defaults": {
@@ -83,7 +83,7 @@
         {
           "datasource": {
             "type": "influxdb",
-            "uid": "bfopgliqc93wgd"
+            "uid": "bfppqcas4iewwc"
           },
           "query": "from(bucket: \"stations\")\n  |> range(start: -1h)\n  |> filter(fn: (r) => r._measurement == \"weather_station\")\n  |> filter(fn: (r) => r._field == \"lightning_distance\")\n  |> last()",
           "refId": "A"
@@ -95,7 +95,7 @@
     {
       "datasource": {
         "type": "influxdb",
-        "uid": "bfopgliqc93wgd"
+        "uid": "bfppqcas4iewwc"
       },
       "fieldConfig": {
         "defaults": {
@@ -149,7 +149,7 @@
         {
           "datasource": {
             "type": "influxdb",
-            "uid": "bfopgliqc93wgd"
+            "uid": "bfppqcas4iewwc"
           },
           "query": "from(bucket: \"stations\")\n  |> range(start: -1h)\n  |> filter(fn: (r) => r._measurement == \"weather_station\")\n  |> filter(fn: (r) => r._field == \"lightning_distance\")",
           "refId": "A"
@@ -161,7 +161,7 @@
     {
       "datasource": {
         "type": "influxdb",
-        "uid": "bfopgliqc93wgd"
+        "uid": "bfppqcas4iewwc"
       },
       "fieldConfig": {
         "defaults": {
@@ -216,7 +216,7 @@
         {
           "datasource": {
             "type": "influxdb",
-            "uid": "bfopgliqc93wgd"
+            "uid": "bfppqcas4iewwc"
           },
           "query": "from(bucket: \"stations\")\n  |> range(start: -1h)\n  |> filter(fn: (r) => r._measurement == \"weather_station\")\n  |> filter(fn: (r) => r._field == \"pressure_hpa\")\n  |> last()",
           "refId": "A"
@@ -228,7 +228,7 @@
     {
       "datasource": {
         "type": "influxdb",
-        "uid": "bfopgliqc93wgd"
+        "uid": "bfppqcas4iewwc"
       },
       "fieldConfig": {
         "defaults": {
@@ -287,7 +287,7 @@
         {
           "datasource": {
             "type": "influxdb",
-            "uid": "bfopgliqc93wgd"
+            "uid": "bfppqcas4iewwc"
           },
           "query": "from(bucket: \"stations\")\n  |> range(start: -1h)\n  |> filter(fn: (r) => r._measurement == \"weather_station\")\n  |> filter(fn: (r) => r._field == \"sky_temp\")\n  |> last()",
           "refId": "A"
@@ -299,7 +299,7 @@
     {
       "datasource": {
         "type": "influxdb",
-        "uid": "bfopgliqc93wgd"
+        "uid": "bfppqcas4iewwc"
       },
       "fieldConfig": {
         "defaults": {
@@ -380,7 +380,7 @@
         {
           "datasource": {
             "type": "influxdb",
-            "uid": "bfopgliqc93wgd"
+            "uid": "bfppqcas4iewwc"
           },
           "query": "from(bucket: \"stations\")\n  |> range(start: -1h)\n  |> filter(fn: (r) => r._measurement == \"weather_station\")\n  |> filter(fn: (r) => r._field == \"lightning_distance\")",
           "refId": "A"
@@ -392,7 +392,7 @@
     {
       "datasource": {
         "type": "influxdb",
-        "uid": "bfopgliqc93wgd"
+        "uid": "bfppqcas4iewwc"
       },
       "fieldConfig": {
         "defaults": {
@@ -473,7 +473,7 @@
         {
           "datasource": {
             "type": "influxdb",
-            "uid": "bfopgliqc93wgd"
+            "uid": "bfppqcas4iewwc"
           },
           "query": "from(bucket: \"stations\")\n  |> range(start: -1h)\n  |> filter(fn: (r) => r._measurement == \"weather_station\")\n  |> filter(fn: (r) => r._field == \"pressure_hpa\")",
           "refId": "A"
@@ -485,7 +485,7 @@
     {
       "datasource": {
         "type": "influxdb",
-        "uid": "bfopgliqc93wgd"
+        "uid": "bfppqcas4iewwc"
       },
       "fieldConfig": {
         "defaults": {
@@ -566,7 +566,7 @@
         {
           "datasource": {
             "type": "influxdb",
-            "uid": "bfopgliqc93wgd"
+            "uid": "bfppqcas4iewwc"
           },
           "query": "from(bucket: \"stations\")\n  |> range(start: -1h)\n  |> filter(fn: (r) => r._measurement == \"weather_station\")\n  |> filter(fn: (r) => r._field == \"vibration\")",
           "refId": "A"

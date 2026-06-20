@@ -24,7 +24,7 @@
     {
       "datasource": {
         "type": "influxdb",
-        "uid": "bfopgliqc93wgd"
+        "uid": "bfppqcas4iewwc"
       },
       "fieldConfig": {
         "defaults": {
@@ -87,7 +87,7 @@
         {
           "datasource": {
             "type": "influxdb",
-            "uid": "bfopgliqc93wgd"
+            "uid": "bfppqcas4iewwc"
           },
           "query": "from(bucket: \"stations\")\n  |> range(start: -1h)\n  |> filter(fn: (r) => r._measurement == \"weather_station\")\n  |> filter(fn: (r) => r._field == \"pm25\")\n  |> last()",
           "refId": "A"
@@ -99,7 +99,7 @@
     {
       "datasource": {
         "type": "influxdb",
-        "uid": "bfopgliqc93wgd"
+        "uid": "bfppqcas4iewwc"
       },
       "fieldConfig": {
         "defaults": {
@@ -158,7 +158,7 @@
         {
           "datasource": {
             "type": "influxdb",
-            "uid": "bfopgliqc93wgd"
+            "uid": "bfppqcas4iewwc"
           },
           "query": "from(bucket: \"stations\")\n  |> range(start: -1h)\n  |> filter(fn: (r) => r._measurement == \"weather_station\")\n  |> filter(fn: (r) => r._field == \"pm10\")\n  |> last()",
           "refId": "A"
@@ -170,7 +170,7 @@
     {
       "datasource": {
         "type": "influxdb",
-        "uid": "bfopgliqc93wgd"
+        "uid": "bfppqcas4iewwc"
       },
       "fieldConfig": {
         "defaults": {
@@ -225,7 +225,7 @@
         {
           "datasource": {
             "type": "influxdb",
-            "uid": "bfopgliqc93wgd"
+            "uid": "bfppqcas4iewwc"
           },
           "query": "from(bucket: \"stations\")\n  |> range(start: -1h)\n  |> filter(fn: (r) => r._measurement == \"weather_station\")\n  |> filter(fn: (r) => r._field == \"pm1\")\n  |> last()",
           "refId": "A"
@@ -237,7 +237,7 @@
     {
       "datasource": {
         "type": "influxdb",
-        "uid": "bfopgliqc93wgd"
+        "uid": "bfppqcas4iewwc"
       },
       "fieldConfig": {
         "defaults": {
@@ -296,7 +296,7 @@
         {
           "datasource": {
             "type": "influxdb",
-            "uid": "bfopgliqc93wgd"
+            "uid": "bfppqcas4iewwc"
           },
           "query": "from(bucket: \"stations\")\n  |> range(start: -1h)\n  |> filter(fn: (r) => r._measurement == \"weather_station\")\n  |> filter(fn: (r) => r._field == \"co2\")\n  |> last()",
           "refId": "A"
@@ -308,7 +308,7 @@
     {
       "datasource": {
         "type": "influxdb",
-        "uid": "bfopgliqc93wgd"
+        "uid": "bfppqcas4iewwc"
       },
       "fieldConfig": {
         "defaults": {
@@ -367,7 +367,7 @@
         {
           "datasource": {
             "type": "influxdb",
-            "uid": "bfopgliqc93wgd"
+            "uid": "bfppqcas4iewwc"
           },
           "query": "from(bucket: \"stations\")\n  |> range(start: -1h)\n  |> filter(fn: (r) => r._measurement == \"weather_station\")\n  |> filter(fn: (r) => r._field == \"voc\")\n  |> last()",
           "refId": "A"
@@ -379,7 +379,7 @@
     {
       "datasource": {
         "type": "influxdb",
-        "uid": "bfopgliqc93wgd"
+        "uid": "bfppqcas4iewwc"
       },
       "fieldConfig": {
         "defaults": {
@@ -459,7 +459,7 @@
         {
           "datasource": {
             "type": "influxdb",
-            "uid": "bfopgliqc93wgd"
+            "uid": "bfppqcas4iewwc"
           },
           "query": "from(bucket: \"stations\")\n  |> range(start: -1h)\n  |> filter(fn: (r) => r._measurement == \"weather_station\")\n  |> filter(fn: (r) => r._field == \"aqi\")\n  |> last()",
           "refId": "A"
@@ -471,7 +471,7 @@
     {
       "datasource": {
         "type": "influxdb",
-        "uid": "bfopgliqc93wgd"
+        "uid": "bfppqcas4iewwc"
       },
       "fieldConfig": {
         "defaults": {
@@ -551,7 +551,7 @@
         {
           "datasource": {
             "type": "influxdb",
-            "uid": "bfopgliqc93wgd"
+            "uid": "bfppqcas4iewwc"
           },
           "query": "from(bucket: \"stations\")\n  |> range(start: -1h)\n  |> filter(fn: (r) => r._measurement == \"weather_station\")\n  |> filter(fn: (r) => r._field == \"pm1\" or r._field == \"pm25\" or r._field == \"pm10\")",
           "refId": "A"
@@ -563,7 +563,7 @@
     {
       "datasource": {
         "type": "influxdb",
-        "uid": "bfopgliqc93wgd"
+        "uid": "bfppqcas4iewwc"
       },
       "fieldConfig": {
         "defaults": {
@@ -643,7 +643,7 @@
         {
           "datasource": {
             "type": "influxdb",
-            "uid": "bfopgliqc93wgd"
+            "uid": "bfppqcas4iewwc"
           },
           "query": "from(bucket: \"stations\")\n  |> range(start: -1h)\n  |> filter(fn: (r) => r._measurement == \"weather_station\")\n  |> filter(fn: (r) => r._field == \"co2\" or r._field == \"voc\")",
           "refId": "A"
