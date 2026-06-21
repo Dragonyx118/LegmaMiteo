@@ -40,17 +40,17 @@ anyone to build, deploy, and contribute data to a global open network.
 
 ## 🧩 Modules
 
-| Module | Sensors | Use Case |
-|--------|---------|----------|
-| **BASE** | BME280, VEML7700, Rain detector, Anemometer, Rain gauge | Everywhere |
-| **MOD-AIR** | PMS5003, SCD40, ENS160+AHT21 | Urban / Industrial |
-| **MOD-STORM** | AS3935, BMP580, GY-91, MLX90614BAA, TSL2591 | Storm monitoring |
-| **MOD-HYDRO** | Ultrasonic level, flow sensor, turbidity | Rivers / Flood zones |
-| **MOD-SOIL** | Capacitive moisture x3, DS18B20 | Agriculture / Forest |
-| **MOD-SNOW** | VL53L1X, load cell, DS18B20, OV2640 | Mountain / Alpine |
-| **MOD-FIRE** | Flame IR, MQ-7, MQ-2 | Mediterranean / Forest |
-| **MOD-NOISE** | MEMS microphone SPH0645 | Urban / Industrial |
-| **MOD-RAD** | ML8511 UV, Geiger tube | High altitude |
+| Module | Sensors | Use Case | Status |
+|--------|---------|----------|--------|
+| **BASE** | BME280, VEML7700, Rain detector, Anemometer, Rain gauge | Everywhere | ✅ Deployed (station-001) |
+| **MOD-AIR** | PMS5003, SCD40, ENS160+AHT21 | Urban / Industrial | 🚧 Dashboard ready, firmware WIP |
+| **MOD-STORM** | AS3935, BMP580, GY-91, MLX90614BAA, TSL2591 | Storm monitoring | 🚧 Dashboard ready, firmware WIP |
+| **MOD-HYDRO** | Ultrasonic level, flow sensor, turbidity | Rivers / Flood zones | 📋 Planned |
+| **MOD-SOIL** | Capacitive moisture x3, DS18B20 | Agriculture / Forest | 📋 Planned |
+| **MOD-SNOW** | VL53L1X, load cell, DS18B20, OV2640 | Mountain / Alpine | 📋 Planned |
+| **MOD-FIRE** | Flame IR, MQ-7, MQ-2 | Mediterranean / Forest | 📋 Planned |
+| **MOD-NOISE** | MEMS microphone SPH0645 | Urban / Industrial | 💡 Concept |
+| **MOD-RAD** | ML8511 UV, Geiger tube | High altitude | 💡 Concept |
 
 ---
 
@@ -170,10 +170,38 @@ Grafana-based alerting with Telegram notifications. Active alert rules:
 
 ## 🚀 Getting Started
 
-### Server (your PC or VPS)
+### Option 1 — Standalone server package (recommended)
+
+The fastest way to get a server running on a **Raspberry Pi, Linux box, or
+Windows PC** — no manual Docker setup needed. Download the latest release
+package, which includes an installer that generates secure random
+credentials for you automatically:
+
+👉 **[Latest release](https://github.com/Dragonyx118/LegmaMiteo/releases/latest)**
 
 ```bash
-git clone https://github.com/Dragonyx/LegmaMiteo
+# Linux / Raspberry Pi
+tar -xzf LegmaMiteo-server.tar.gz
+cd LegmaMiteo-server
+chmod +x install.sh
+./install.sh
+```
+
+```powershell
+# Windows (PowerShell, with Docker Desktop running)
+Expand-Archive LegmaMiteo-server.zip
+cd LegmaMiteo-server
+Set-ExecutionPolicy -Scope Process -ExecutionPolicy Bypass
+.\install.ps1
+```
+
+The installer prints the generated admin credentials and URLs at the end —
+save them somewhere safe.
+
+### Option 2 — Clone the full repo (for development)
+
+```bash
+git clone https://github.com/Dragonyx118/LegmaMiteo
 cd LegmaMiteo/server
 docker compose up -d
 ```
@@ -182,8 +210,12 @@ Then open:
 - Grafana: http://localhost:3000
 - InfluxDB: http://localhost:8086
 
-Default credentials: `admin` / `openweather123`
-(change these before any public deployment)
+⚠️ This path does **not** generate credentials automatically. Set your own
+`INFLUXDB_ADMIN_PASSWORD`, `GRAFANA_ADMIN_PASSWORD`, and `INFLUX_TOKEN` in a
+`server/.env` file before running `docker compose up` — never commit real
+credentials to the repo. See `server/telegraf/telegraf.conf.example` and
+`firmware/base/*/src/secrets.h.example` for the files you need to copy and
+fill in locally.
 
 ### Firmware
 

@@ -7,16 +7,10 @@
 #include <WiFi.h>
 #include <PubSubClient.h>
 #include <ArduinoJson.h>
+#include "secrets.h"
 
 // --- Configurazione ---
-const char* WIFI_SSID     = "LAPTOP1234";
-const char* WIFI_PASSWORD = "12345678";
-const char* MQTT_HOST     = "192.168.137.1";  // es. 192.168.1.100
-const int   MQTT_PORT     = 1883;
-const char* STATION_ID    = "station-001";
 const int   SEND_INTERVAL = 30000; // ms tra un invio e l'altro
-const char* MQTT_USER = "station-esp32";
-const char* MQTT_PASSWORD = "LegmaMiteo2026!";
 
 // --- Oggetti ---
 WiFiClient wifiClient;
