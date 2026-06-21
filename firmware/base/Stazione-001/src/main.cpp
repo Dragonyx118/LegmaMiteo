@@ -6,6 +6,42 @@
 //       l'ultimo). Aggiunto anche un tentativo immediato di reconnect MQTT
 //       appena il WiFi torna disponibile, per svuotare la coda più in fretta.
 // FIX NTP: Attesa attiva della sincronizzazione orario nel setup.
+//
+// RISPARMIO ENERGETICO — DEEP SLEEP:
+// Ogni esecuzione di questo firmware corrisponde a UN SOLO CICLO di
+// lettura/invio. Dopo aver pubblicato/salvato il dato, l'ESP32 va in deep
+// sleep per il tempo restante e si risveglia con un RESET COMPLETO
+// (equivalente a spegnere e riaccendere), ripetendo tutto da capo:
+//   - CPU, RAM, WiFi, periferiche: tutto spento durante il sonno (massimo
+//     risparmio energetico possibile su ESP32, ~10-150µA)
+//   - Al risveglio: boot completo, reinizializzazione di tutto, nuova
+//     connessione WiFi e MQTT da zero
+// COMPROMESSO ACCETTATO: ogni ciclo richiede ~1-3s extra per il reconnect
+// WiFi/MQTT rispetto a rimanere sempre connessi. Su un intervallo di 10s
+// questo è un sovraccarico significativo, ma è la scelta voluta per
+// massimizzare il risparmio energetico rispetto a tenere il WiFi sempre
+// attivo (vedi cronologia: il light sleep manuale causava disconnessioni
+// e riavvii spontanei su questa rete; il deep sleep evita il problema
+// perché non c'è nessuna sessione WiFi da mantenere viva durante il sonno).
+//
+// PERSISTENZA DELLO STATO NTP TRA UN CICLO E L'ALTRO:
+// Il deep sleep azzera la RAM normale, ma la RTC memory (8KB) sopravvive.
+// La variabile timeSynchronized è quindi marcata RTC_DATA_ATTR: una volta
+// che l'orario è stato sincronizzato con successo (NTP o fallback HTTP),
+// i cicli successivi non ripetono la richiesta — risparmiando tempo e
+// energia — finché il dispositivo non perde l'alimentazione del tutto
+// (in quel caso anche la RTC memory si svuota e si risincronizza da capo,
+// cosa comunque innocua).
+//
+// NB: i dati sulla SD non sono mai a rischio in nessuno scenario: sono su
+// memoria non volatile e sopravvivono a reset, spegnimenti e deep sleep.
+//
+// FALLBACK ORARIO VIA HTTP (HTTPS):
+// Se NTP (protocollo UDP) fallisce — es. su reti/hotspot che filtrano o
+// ritardano UDP in modo intermittente — si tenta di ottenere l'orario
+// tramite una richiesta HTTPS (TCP) a un servizio pubblico (timeapi.io).
+// Essendo TCP su porta 443, attraversa NAT/firewall esattamente come la
+// normale navigazione web, quindi funziona ovunque funzioni il browser.
 // ============================================================================
 
 #include <Arduino.h>
@@ -18,6 +54,9 @@
 #include <SD.h>
 #include "time.h"
 #include "secrets.h"
+#include <HTTPClient.h>
+#include <WiFiClientSecure.h>
+#include "esp_sleep.h"
 
 
 // Server NTP per l'orario esatto
@@ -25,16 +64,19 @@ const char* NTP_SERVER    = "time.google.com";
 const long  GMT_OFFSET_SEC = 3600;        // Italia: UTC+1
 const int   DAYLIGHT_OFFSET_SEC = 3600;   // Ora legale attivata
 
+// Fallback HTTP per l'orario, usato solo se NTP fallisce (vedi sopra)
+const char* TIME_API_URL = "https://timeapi.io/api/time/current/zone?timeZone=Europe/Rome";
+
 // --- Pin del Modulo SD ---
 const int chipSelect = 5; 
 
-// --- Temporizzatori (in millisecondi) ---
-const unsigned long SEND_INTERVAL       = 10000; // Lettura/Salvataggio ogni 10 secondi
-const unsigned long WIFI_CHECK_INTERVAL = 30000; // Controllo Wi-Fi ogni 30 secondi
+// --- Durata del ciclo (in microsecondi, per esp_sleep_enable_timer_wakeup) ---
+const uint64_t CYCLE_DURATION_US = 10000000ULL; // 10 secondi
 
-unsigned long lastSend = 0;
-unsigned long lastWifiCheck = 0;
-bool timeSynchronized = false;
+// --- Stato persistente in RTC memory: sopravvive al deep sleep ---
+// (ma NON a un power-cycle completo, in quel caso si resetta a false e
+// va bene così: ci si risincronizza semplicemente al prossimo boot)
+RTC_DATA_ATTR bool timeSynchronized = false;
 
 // --- Oggetti ---
 WiFiClient wifiClient;
@@ -52,15 +94,132 @@ String getTimestamp() {
   return String(timeStringBuff);
 }
 
-// --- Connessione Wi-Fi asincrona con attesa NTP controllata ---
-void connectWifi() {
-  if (WiFi.status() == WL_CONNECTED) return;
+// --- Fallback: ottiene l'orario via HTTPS quando NTP (UDP) fallisce ---
+// Usa timeapi.io, gratuito e senza API key. La richiesta passa su TCP/443,
+// quindi attraversa NAT/firewall/hotspot esattamente come una normale
+// pagina web — non risente dei blocchi/ritardi che colpiscono UDP/NTP.
+bool syncTimeViaHttp() {
+  if (WiFi.status() != WL_CONNECTED) return false;
 
-  Serial.print("\n[WiFi] Tentativo di connessione...");
+  WiFiClientSecure client;
+  client.setInsecure(); // Niente verifica del certificato: accettabile per
+                        // un semplice servizio di lettura orario, non per
+                        // dati sensibili. Evita di dover gestire CA bundle.
+
+  HTTPClient http;
+  Serial.print("[TIME-HTTP] Richiesta orario via HTTPS a timeapi.io...");
+
+  if (!http.begin(client, TIME_API_URL)) {
+    Serial.println(" Impossibile avviare la richiesta.");
+    return false;
+  }
+
+  http.setTimeout(8000); // 8s, generoso per una richiesta TCP/TLS singola
+
+  int httpCode = http.GET();
+  if (httpCode != 200) {
+    Serial.printf(" Fallita, HTTP code=%d\n", httpCode);
+    http.end();
+    return false;
+  }
+
+  String payload = http.getString();
+  http.end();
+
+  JsonDocument doc;
+  DeserializationError err = deserializeJson(doc, payload);
+  if (err) {
+    Serial.println(" Errore nel parsing JSON della risposta.");
+    return false;
+  }
+
+  // Risposta tipica timeapi.io:
+  // { "year":2026, "month":6, "day":21, "hour":14, "minute":5, "seconds":30, ... }
+  int year   = doc["year"]   | 0;
+  int month  = doc["month"]  | 0;
+  int day    = doc["day"]    | 0;
+  int hour   = doc["hour"]   | 0;
+  int minute = doc["minute"] | 0;
+  int second = doc["seconds"]| 0;
+
+  if (year < 2024) { // Sanity check minimo sulla risposta
+    Serial.println(" Risposta JSON priva di dati orario validi.");
+    return false;
+  }
+
+  struct tm t;
+  t.tm_year = year - 1900;
+  t.tm_mon  = month - 1;
+  t.tm_mday = day;
+  t.tm_hour = hour;
+  t.tm_min  = minute;
+  t.tm_sec  = second;
+  t.tm_isdst = 0;
+
+  time_t epoch = mktime(&t);
+  struct timeval tv = { .tv_sec = epoch, .tv_usec = 0 };
+  settimeofday(&tv, NULL);
+
+  Serial.println(" OK! Orario impostato da timeapi.io.");
+  return true;
+}
+
+// --- Tenta la sincronizzazione NTP, con fallback HTTP ---
+// Chiamata una sola volta per ciclo (siamo in deep sleep, non c'è un
+// loop() che gira nel tempo): se NTP fallisce qui, si tenta subito l'HTTP.
+void trySyncTime() {
+  // configTime() imposta il fuso orario locale (GMT+DST offset) usato da
+  // getLocalTime() per QUALSIASI chiamata successiva in questo boot —
+  // anche se l'orologio interno (RTC) era già stato sincronizzato in un
+  // ciclo precedente e qui saltiamo la vera richiesta di rete sotto.
+  // BUG FIXATO: prima questa chiamata stava SOLO dentro il blocco "se non
+  // ancora sincronizzato", quindi nei cicli successivi (con
+  // timeSynchronized già true dalla RTC memory) l'offset non veniva mai
+  // più impostato in quel boot, e getLocalTime() restituiva un orario
+  // sfasato (mancava l'ora legale, -2h rispetto al corretto).
+  configTime(GMT_OFFSET_SEC, DAYLIGHT_OFFSET_SEC, NTP_SERVER, "pool.ntp.org", "time.cloudflare.com");
+
+  if (timeSynchronized) return; // Offset impostato, RTC del chip già
+                                 // corretta dal boot precedente: non
+                                 // serve rifare la richiesta di rete.
+  if (WiFi.status() != WL_CONNECTED) return;
+
+  Serial.print("[TIME] Sincronizzazione orario con NTP in corso...");
+  struct tm timeinfo;
+  int ntpAttempts = 0;
+
+  // Tenta la sincronizzazione per massimo 6 secondi (12 * 500ms).
+  // Ridotto rispetto ai 10s precedenti: in deep sleep ogni secondo speso
+  // qui è un secondo di consumo energetico "attivo" in più, quindi vale
+  // la pena fallire un po' più in fretta verso il fallback HTTP.
+  while (!getLocalTime(&timeinfo) && ntpAttempts < 12) {
+    delay(500);
+    Serial.print(".");
+    ntpAttempts++;
+  }
+
+  if (ntpAttempts < 12) {
+    Serial.println("\n[TIME] Orologio interno sincronizzato con successo (NTP)!");
+    timeSynchronized = true;
+    return;
+  }
+
+  Serial.println("\n[TIME] Timeout NTP. Provo il fallback HTTP...");
+  if (syncTimeViaHttp()) {
+    timeSynchronized = true;
+  } else {
+    Serial.println("[TIME] ATTENZIONE: Fallback HTTP fallito anch'esso. Riproverò al prossimo ciclo.");
+  }
+}
+
+// --- Connessione Wi-Fi (un solo tentativo per ciclo, no retry loop lungo) ---
+bool connectWifi() {
+  Serial.print("[WiFi] Tentativo di connessione...");
+  WiFi.mode(WIFI_STA);
   WiFi.begin(WIFI_SSID, WIFI_PASSWORD);
-  
+
   int attempts = 0;
-  while (WiFi.status() != WL_CONNECTED && attempts < 8) {
+  while (WiFi.status() != WL_CONNECTED && attempts < 16) {
     delay(500);
     Serial.print(".");
     attempts++;
@@ -68,32 +227,12 @@ void connectWifi() {
 
   if (WiFi.status() == WL_CONNECTED) {
     Serial.println("\n[WiFi] Connesso! IP: " + WiFi.localIP().toString());
-    
-    if (!timeSynchronized) {
-      configTime(GMT_OFFSET_SEC, DAYLIGHT_OFFSET_SEC, NTP_SERVER);
-      
-      Serial.print("[TIME] Sincronizzazione orario con NTP in corso...");
-      struct tm timeinfo;
-      int ntpAttempts = 0;
-      
-      // Tenta la sincronizzazione per massimo 10 secondi (20 * 500ms)
-      while (!getLocalTime(&timeinfo) && ntpAttempts < 20) {
-        delay(500);
-        Serial.print(".");
-        ntpAttempts++;
-      }
-      
-      if (ntpAttempts < 20) {
-        Serial.println("\n[TIME] Orologio interno sincronizzato con successo!");
-        timeSynchronized = true;
-      } else {
-        // Se fallisce, non blocca l'ESP32: va avanti e ci riproverà più tardi
-        Serial.println("\n[TIME] ATTENZIONE: Timeout NTP. Connessione internet assente o bloccata dal Firewall.");
-      }
-    }
-  } else {
-    Serial.println("\n[WiFi] Rete offline. Uso la scheda SD.");
+    trySyncTime();
+    return true;
   }
+
+  Serial.println("\n[WiFi] Rete offline. Uso la scheda SD.");
+  return false;
 }
 
 // --- Invia i dati accumulati sulla SD e ripulisce il file ---
@@ -127,19 +266,19 @@ void svuotaCodaSD() {
 }
 
 // --- Connessione Broker MQTT ---
-void connectMqtt() {
-  if (WiFi.status() != WL_CONNECTED) return;
-  
-  if (!mqtt.connected()) {
-    Serial.print("[MQTT] Connessione in corso...");
-    if (mqtt.connect(STATION_ID, MQTT_USER, MQTT_PASSWORD)) {
-      Serial.println("Connesso!");
-      svuotaCodaSD();
-    } else {
-      Serial.print("Fallita, errore=");
-      Serial.println(mqtt.state());
-    }
+bool connectMqtt() {
+  if (WiFi.status() != WL_CONNECTED) return false;
+
+  Serial.print("[MQTT] Connessione in corso...");
+  if (mqtt.connect(STATION_ID, MQTT_USER, MQTT_PASSWORD)) {
+    Serial.println("Connesso!");
+    svuotaCodaSD();
+    return true;
   }
+
+  Serial.print("Fallita, errore=");
+  Serial.println(mqtt.state());
+  return false;
 }
 
 // --- Scrittura fisica su file in MicroSD ---
@@ -154,8 +293,8 @@ void scriviSuSD(String payload) {
   Serial.println("[SD-STORE] Dati salvati localmente su SD: " + payload);
 }
 
-// --- Acquisizione e smistamento ---
-void handleDataCycle() {
+// --- Acquisizione e smistamento (un solo ciclo, niente loop) ---
+void handleDataCycle(bool mqttReady) {
   float real_temp = bmp.readTemperature();
   float real_press = bmp.readPressure() / 100.0F;
 
@@ -179,7 +318,7 @@ void handleDataCycle() {
   char payload[256];
   serializeJson(doc, payload);
 
-  if (WiFi.status() == WL_CONNECTED && mqtt.connected()) {
+  if (mqttReady && mqtt.connected()) {
     char topic[64];
     snprintf(topic, sizeof(topic), "station/%s/base", STATION_ID);
     if (mqtt.publish(topic, payload)) {
@@ -191,9 +330,38 @@ void handleDataCycle() {
   scriviSuSD(String(payload));
 }
 
+// --- Calcola il tempo di deep sleep restante e ci entra ---
+// Sottrae il tempo già impiegato in questo ciclo (boot, connessioni,
+// lettura sensore) dalla durata target del ciclo, così l'intervallo tra
+// una lettura e l'altra resta ~10s anche considerando il tempo "attivo".
+void goToDeepSleep(unsigned long cycleStartMillis) {
+  unsigned long elapsedMs = millis() - cycleStartMillis;
+  uint64_t elapsedUs = (uint64_t)elapsedMs * 1000ULL;
+
+  uint64_t sleepUs = (elapsedUs < CYCLE_DURATION_US)
+                        ? (CYCLE_DURATION_US - elapsedUs)
+                        : 0; // Se il ciclo attivo ha già superato i 10s,
+                             // dorme il minimo indispensabile (0 non è
+                             // valido per il timer, quindi si usa 1ms).
+  if (sleepUs == 0) sleepUs = 1000ULL;
+
+  Serial.printf("[SLEEP] Ciclo attivo: %lums. Deep sleep per %llums.\n",
+                elapsedMs, sleepUs / 1000ULL);
+  Serial.flush();
+
+  esp_sleep_enable_timer_wakeup(sleepUs);
+  esp_deep_sleep_start();
+  // L'esecuzione non torna mai qui: al risveglio si ha un reset completo
+  // e si riparte da setup().
+}
+
 void setup() {
+  unsigned long cycleStart = millis();
+
   Serial.begin(115200);
-  Serial.println("\n--- Avvio Stazione LegmaMiteo + Modulo SD ---");
+  delay(100); // Piccola pausa per dare tempo al monitor seriale di
+              // riallacciarsi dopo il risveglio dal deep sleep.
+  Serial.println("\n--- Ciclo Stazione LegmaMiteo + Modulo SD (deep sleep) ---");
 
   if (!bmp.begin()) {
     Serial.println("[HARDWARE] BMP180 non rilevato!");
@@ -209,35 +377,22 @@ void setup() {
   }
 
   mqtt.setServer(MQTT_HOST, MQTT_PORT);
-  
-  connectWifi();
-  connectMqtt();
 
-  lastSend = millis();
-  lastWifiCheck = millis();
+  bool wifiOk = connectWifi();
+  bool mqttOk = wifiOk && connectMqtt();
+
+  handleDataCycle(mqttOk);
+
+  // Chiusura ordinata prima del sonno: evita che la connessione resti
+  // a metà e contribuisce a liberare risorse.
+  if (mqtt.connected()) mqtt.disconnect();
+  if (WiFi.status() == WL_CONNECTED) WiFi.disconnect(true);
+
+  goToDeepSleep(cycleStart);
 }
 
 void loop() {
-  if (WiFi.status() == WL_CONNECTED && mqtt.connected()) {
-    mqtt.loop();
-  }
-
-  unsigned long currentMillis = millis();
-
-  if (currentMillis - lastWifiCheck >= WIFI_CHECK_INTERVAL) {
-    lastWifiCheck = currentMillis;
-    if (WiFi.status() != WL_CONNECTED) {
-      connectWifi();
-      if (WiFi.status() == WL_CONNECTED) {
-        connectMqtt();
-      }
-    } else {
-      connectMqtt();
-    }
-  }
-
-  if (currentMillis - lastSend >= SEND_INTERVAL) {
-    lastSend = currentMillis;
-    handleDataCycle();
-  }
+  // Mai eseguito: dopo setup() il dispositivo va sempre in deep sleep,
+  // che equivale a un reset. loop() resta vuoto per compatibilità con
+  // il framework Arduino, che richiede comunque questa funzione.
 }
