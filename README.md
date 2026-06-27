@@ -16,14 +16,28 @@ An open-source, modular, and scalable weather station network designed for
 real-time climate monitoring. Built with affordability and replicability in
 mind — each unit costs under €200 and can be deployed anywhere.
 
+🇮🇹 **[Leggi in italiano](README.it.md)**
+
 ---
 
 ## 🌍 Why This Project
 
-Climate change is accelerating the frequency and intensity of extreme weather
-events. Existing weather station networks are sparse, expensive, and often
-closed. LegmaMiteo aims to democratize weather monitoring by enabling
-anyone to build, deploy, and contribute data to a global open network.
+Climate change is increasing the frequency and intensity of severe
+convective weather — supercells, hailstorms, tornadoes — across Northern
+Italy. National forecast models (ARPA, ECMWF, ICON) run at spatial and
+temporal resolutions too coarse to nowcast these fast-developing,
+localized events: by the time a model grid cell updates, the storm has
+often already passed.
+
+LegmaMiteo closes that gap with a dense, low-cost network of
+micro-meteorological stations built for **nowcasting** — short-term,
+hyperlocal prediction — focused initially on Lombardia. More stations
+means finer-grained, faster-updating ground truth than any single
+national model can provide, and an open dataset that grows with the
+community deploying it. Existing weather station networks are sparse,
+expensive, and often closed; LegmaMiteo aims to democratize severe
+weather monitoring by enabling anyone to build, deploy, and contribute
+data to a global open network.
 
 ---
 
