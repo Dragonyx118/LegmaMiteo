@@ -188,17 +188,17 @@ void trySyncTime() {
   struct tm timeinfo;
   int ntpAttempts = 0;
 
-  // Tenta la sincronizzazione per massimo 6 secondi (12 * 500ms).
-  // Ridotto rispetto ai 10s precedenti: in deep sleep ogni secondo speso
-  // qui è un secondo di consumo energetico "attivo" in più, quindi vale
-  // la pena fallire un po' più in fretta verso il fallback HTTP.
-  while (!getLocalTime(&timeinfo) && ntpAttempts < 12) {
+  // Tenta la sincronizzazione per massimo 4 secondi (8 * 500ms).
+  // Ridotto per lasciare margine al deep sleep finale: con timeout WiFi
+  // (4s) + NTP (4s) + boot/init (~1-2s), il ciclo attivo resta sotto la
+  // soglia dei 10s anche nello scenario peggiore (WiFi lento + NTP lento).
+  while (!getLocalTime(&timeinfo) && ntpAttempts < 8) {
     delay(500);
     Serial.print(".");
     ntpAttempts++;
   }
 
-  if (ntpAttempts < 12) {
+  if (ntpAttempts < 8) {
     Serial.println("\n[TIME] Orologio interno sincronizzato con successo (NTP)!");
     timeSynchronized = true;
     return;
@@ -219,7 +219,7 @@ bool connectWifi() {
   WiFi.begin(WIFI_SSID, WIFI_PASSWORD);
 
   int attempts = 0;
-  while (WiFi.status() != WL_CONNECTED && attempts < 16) {
+  while (WiFi.status() != WL_CONNECTED && attempts < 8) {
     delay(500);
     Serial.print(".");
     attempts++;
@@ -362,6 +362,16 @@ void setup() {
   delay(100); // Piccola pausa per dare tempo al monitor seriale di
               // riallacciarsi dopo il risveglio dal deep sleep.
   Serial.println("\n--- Ciclo Stazione LegmaMiteo + Modulo SD (deep sleep) ---");
+
+  // Imposta SEMPRE l'offset GMT+DST locale, indipendentemente dal WiFi.
+  // È un'operazione puramente locale (non richiede rete) ma necessaria
+  // perché getLocalTime()/getTimestamp() la usano in ogni ciclo. Senza
+  // questa chiamata qui, nei cicli in cui il WiFi falliva l'offset non
+  // veniva mai impostato in quel boot: la RTC del chip aveva comunque
+  // l'epoch UTC corretto, ma senza offset il timestamp risultava sfasato
+  // di 2 ore (l'esatta differenza GMT+DST osservata nei dati salvati su
+  // SD durante le interruzioni di rete).
+  configTime(GMT_OFFSET_SEC, DAYLIGHT_OFFSET_SEC, NTP_SERVER, "pool.ntp.org", "time.cloudflare.com");
 
   if (!bmp.begin()) {
     Serial.println("[HARDWARE] BMP180 non rilevato!");

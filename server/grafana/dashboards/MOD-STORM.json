@@ -151,7 +151,7 @@
             "type": "influxdb",
             "uid": "bfppqcas4iewwc"
           },
-          "query": "from(bucket: \"stations\")\n  |> range(start: v.timeRangeStart, stop: v.timeRangeStop)\n  |> filter(fn: (r) => r._measurement == \"weather_station\")\n  |> filter(fn: (r) => r._field == \"lightning_distance\")",
+          "query": "from(bucket: \"stations\")\n  |> range(start: v.timeRangeStart, stop: v.timeRangeStop)\n  |> filter(fn: (r) => r._measurement == \"weather_station\")\n  |> filter(fn: (r) => r._field == \"lightning_distance\")\n  |> aggregateWindow(every: v.windowPeriod, fn: count, createEmpty: false)\n",
           "refId": "A"
         }
       ],
@@ -382,7 +382,7 @@
             "type": "influxdb",
             "uid": "bfppqcas4iewwc"
           },
-          "query": "from(bucket: \"stations\")\n  |> range(start: v.timeRangeStart, stop: v.timeRangeStop)\n  |> filter(fn: (r) => r._measurement == \"weather_station\")\n  |> filter(fn: (r) => r._field == \"lightning_distance\")",
+          "query": "from(bucket: \"stations\")\n  |> range(start: v.timeRangeStart, stop: v.timeRangeStop)\n  |> filter(fn: (r) => r._measurement == \"weather_station\")\n  |> filter(fn: (r) => r._field == \"lightning_distance\")\n  |> aggregateWindow(every: v.windowPeriod, fn: mean, createEmpty: false)\n",
           "refId": "A"
         }
       ],
@@ -475,7 +475,7 @@
             "type": "influxdb",
             "uid": "bfppqcas4iewwc"
           },
-          "query": "from(bucket: \"stations\")\n  |> range(start: v.timeRangeStart, stop: v.timeRangeStop)\n  |> filter(fn: (r) => r._measurement == \"weather_station\")\n  |> filter(fn: (r) => r._field == \"pressure_hpa\")",
+          "query": "from(bucket: \"stations\")\n  |> range(start: v.timeRangeStart, stop: v.timeRangeStop)\n  |> filter(fn: (r) => r._measurement == \"weather_station\")\n  |> filter(fn: (r) => r._field == \"pressure_hpa\")\n  |> aggregateWindow(every: v.windowPeriod, fn: mean, createEmpty: false)\n",
           "refId": "A"
         }
       ],
@@ -568,7 +568,7 @@
             "type": "influxdb",
             "uid": "bfppqcas4iewwc"
           },
-          "query": "from(bucket: \"stations\")\n  |> range(start: v.timeRangeStart, stop: v.timeRangeStop)\n  |> filter(fn: (r) => r._measurement == \"weather_station\")\n  |> filter(fn: (r) => r._field == \"vibration\")",
+          "query": "from(bucket: \"stations\")\n  |> range(start: v.timeRangeStart, stop: v.timeRangeStop)\n  |> filter(fn: (r) => r._measurement == \"weather_station\")\n  |> filter(fn: (r) => r._field == \"vibration\")\n  |> aggregateWindow(every: v.windowPeriod, fn: mean, createEmpty: false)\n",
           "refId": "A"
         }
       ],
