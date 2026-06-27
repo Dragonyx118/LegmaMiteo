@@ -48,7 +48,7 @@ costruire, installare e contribuire dati a una rete aperta e globale.
 Dati in tempo reale e storici da `station-001`, visualizzati in Grafana:
 
 <p align="center">
-  <img src="docs/images/grafana-dashboard.png" alt="Dashboard Grafana di LegmaMiteo con temperatura, umidità, pressione, vento e pioggia" width="900">
+  <img src="docs/img/grafana-dashboard.png" alt="Dashboard Grafana di LegmaMiteo con temperatura, umidità, pressione, vento e pioggia" width="900">
 </p>
 
 ---

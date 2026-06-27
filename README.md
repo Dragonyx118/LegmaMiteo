@@ -46,7 +46,7 @@ data to a global open network.
 Real-time and historical data from `station-001`, visualized in Grafana:
 
 <p align="center">
-  <img src="docs/images/grafana-dashboard.png" alt="LegmaMiteo Grafana dashboard showing temperature, humidity, pressure, wind speed/direction and rainfall history" width="900">
+  <img src="docs/img/grafana-dashboard.png" alt="LegmaMiteo Grafana dashboard showing temperature, humidity, pressure, wind speed/direction and rainfall history" width="900">
 </p>
 
 ---
