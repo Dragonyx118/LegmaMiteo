@@ -78,5 +78,4 @@ server/mosquitto/data/*
 server/mosquitto/log/*
 server/telegraf/telegraf.conf
 server/mosquitto/config/passwd
-firmware/base/Stazione-001/src/secrets.h
-firmware/base/FirmwareBase/src/secrets.h
+**/secrets.h
