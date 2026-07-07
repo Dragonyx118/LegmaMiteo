@@ -53,6 +53,14 @@
 //      ciclo, riscrivendo in modo sicuro (file temporaneo + rename) solo
 //      le righe non ancora inviate. Il backlog si esaurisce così in più
 //      cicli successivi, senza mai bloccare il dispositivo a lungo.
+//
+// FIX RITMO INVIO STORICO SD (dati "mangiati" da MQTT/Grafana):
+// Con solo 10ms di pausa tra un publish e l'altro durante lo svuotamento
+// del backlog, la pipeline Mosquitto->Telegraf->InfluxDB->Grafana perdeva
+// occasionalmente qualche punto quando i lotti erano grandi (righe troppo
+// ravvicinate). Il delay è stato portato a 50ms: sufficiente a dare respiro
+// alla pipeline, mantenendo comunque un lotto di 30 righe entro ~1.5s totali
+// (ampio margine sul ciclo di 10s).
 // ============================================================================
 
 #include <Arduino.h>
@@ -78,8 +86,15 @@ const int   DAYLIGHT_OFFSET_SEC = 3600;   // Ora legale attivata
 // Fallback HTTP per l'orario, usato solo se NTP fallisce (vedi sopra)
 const char* TIME_API_URL = "https://timeapi.io/api/time/current/zone?timeZone=Europe/Rome";
 
-// --- Pin del Modulo SD ---
-const int chipSelect = 5; 
+// --- Pin I2C (BMP180) ---
+const int I2C_SDA = 4;
+const int I2C_SCL = 5;
+
+// --- Pin SPI (Modulo SD) ---
+const int SPI_MISO = 16;
+const int SPI_CLK  = 17;
+const int SPI_MOSI = 15;
+const int chipSelect = 18; // CS
 
 // --- Durata del ciclo (in microsecondi, per esp_sleep_enable_timer_wakeup) ---
 const uint64_t CYCLE_DURATION_US = 10000000ULL; // 10 secondi
@@ -88,6 +103,23 @@ const uint64_t CYCLE_DURATION_US = 10000000ULL; // 10 secondi
 // (ma NON a un power-cycle completo, in quel caso si resetta a false e
 // va bene così: ci si risincronizza semplicemente al prossimo boot)
 RTC_DATA_ATTR bool timeSynchronized = false;
+
+// --- Offset di lettura persistente nel backlog SD ---
+// Sopravvive al deep sleep (RTC memory) cosi' ogni ciclo riprende ESATTAMENTE
+// da dove aveva lasciato l'invio precedente, con file.seek(), invece di
+// rileggere/ricopiare da capo tutto il file (che con backlog di centinaia
+// di migliaia di byte costava 20+ secondi per ciclo SOLO per "saltare" le
+// righe già considerate, anche senza inviarle di nuovo).
+// Si resetta a 0 se manca completamente l'alimentazione (accettabile: nel
+// caso peggiore si ri-processano righe già inviate, ma niente viene perso).
+RTC_DATA_ATTR uint32_t sdReadOffset = 0;
+
+// Ogni quanti byte "consumati" (offset) si esegue una compattazione reale
+// del file (rimuove fisicamente le righe già inviate, liberando spazio).
+// La compattazione costa comunque una copia dell'intero residuo, ma la si
+// fa raramente (non ad ogni ciclo) cosi' il costo si ammortizza su molti
+// cicli invece di pagarlo ogni volta.
+const uint32_t SD_COMPACT_THRESHOLD_BYTES = 200000; // ~200KB consumati
 
 // --- Oggetti ---
 WiFiClient wifiClient;
@@ -246,18 +278,24 @@ bool connectWifi() {
   return false;
 }
 
-// --- Quante righe storiche al massimo si inviano in UN SOLO ciclo ---
-// Prima la funzione svuotava TUTTA la coda in un colpo: con un backlog di
-// più ore (centinaia/migliaia di righe a un ciclo di 10s) questo teneva
-// il dispositivo bloccato qui per 10-15 minuti, durante i quali il dato
-// "live" del ciclo corrente non veniva mai letto (vedi ordine delle
-// chiamate in setup(): ora handleDataCycle() viene fatta PRIMA di questa
-// funzione, quindi quel buco è già evitato a monte; questo limite serve
-// a far rientrare anche lo svuotamento dello storico nel singolo ciclo,
-// così il deep sleep e il prossimo risveglio restano regolari).
-// Con un ciclo da 10s e ~15ms per riga (publish + I/O SD), 30 righe
-// occupano ~0.5s: ampio margine anche sommato al resto del ciclo attivo.
-const int MAX_RIGHE_SD_PER_CICLO = 30;
+// --- Budget di TEMPO (non più numero fisso di righe) per lo svuotamento SD ---
+// Prima il limite era un numero fisso di righe per ciclo (es. 30): con
+// backlog enormi (giorni offline, migliaia di righe) questo era troppo
+// lento — 30 righe/ciclo con connessione buona sprecava capacità inutilizzata,
+// e con migliaia di righe arretrate servivano ORE per smaltire tutto.
+// Ora invece si invia finché non si supera questo budget di tempo: con
+// connessione veloce si riescono a inviare molte più righe nello stesso
+// ciclo (anche 100-200+), con connessione lenta ci si ferma comunque in
+// tempo per non bloccare il dispositivo a tempo indeterminato.
+const unsigned long SD_FLUSH_TIME_BUDGET_MS = 6000; // 6s max dedicati allo
+                                                     // svuotamento storico
+                                                     // per ciclo
+
+// Pausa minima tra un invio e l'altro dello storico, per non "affogare"
+// la pipeline Mosquitto->Telegraf->InfluxDB->Grafana con troppi punti
+// ravvicinati (vedi commit precedente: con 10ms venivano persi alcuni
+// punti durante lotti grandi).
+const unsigned long SD_FLUSH_DELAY_MS = 50;
 
 // --- Invia un LOTTO di dati accumulati sulla SD e ripulisce solo quelli ---
 // Le righe non ancora inviate restano sul file: verranno svuotate nei
@@ -267,9 +305,10 @@ const int MAX_RIGHE_SD_PER_CICLO = 30;
 // si sostituisce il file originale — così un'interruzione a metà
 // (es. mancanza di alimentazione) non puo' corrompere o perdere il backup.
 void svuotaCodaSD() {
-  if (!SD.exists("/backup.jsonl")) return;
-
-  Serial.println("\n[SD-RECOVERY] Rete ripristinata! Invio di un lotto di dati da SD...");
+  if (!SD.exists("/backup.jsonl")) {
+    sdReadOffset = 0; // Nessun file: reset difensivo dell'offset.
+    return;
+  }
 
   File file = SD.open("/backup.jsonl", FILE_READ);
   if (!file) {
@@ -277,67 +316,128 @@ void svuotaCodaSD() {
     return;
   }
 
-  char topic[64];
-  snprintf(topic, sizeof(topic), "station/%s/base", STATION_ID);
+  uint32_t fileSize = file.size();
 
-  // Rimuove eventuale file temporaneo residuo da un ciclo precedente
-  // interrotto a metà (per sicurezza, normalmente non dovrebbe esistere).
-  if (SD.exists("/backup.tmp")) SD.remove("/backup.tmp");
+  // Se l'offset salvato è oltre la fine del file (es. file più corto per
+  // qualche motivo), si riparte da 0 per sicurezza.
+  if (sdReadOffset > fileSize) sdReadOffset = 0;
 
-  File tempFile = SD.open("/backup.tmp", FILE_WRITE);
-  if (!tempFile) {
-    Serial.println("[SD-RECOVERY] Errore critico nella creazione del file temporaneo.");
+  if (sdReadOffset >= fileSize) {
+    // Tutto il file è già stato inviato in cicli precedenti: elimina e
+    // resetta, non c'è altro da fare.
     file.close();
+    SD.remove("/backup.jsonl");
+    sdReadOffset = 0;
+    Serial.println("[SD-RECOVERY] Coda SD completamente svuotata (nessun nuovo dato da inviare).");
     return;
   }
 
+  Serial.printf("\n[SD-RECOVERY] Rete ripristinata! Riprendo l'invio da offset %u/%u byte...\n",
+                sdReadOffset, fileSize);
+
+  // *** PUNTO CHIAVE: si riprende ESATTAMENTE da dove si era arrivati,
+  // senza rileggere/ricopiare le righe precedenti già considerate. ***
+  file.seek(sdReadOffset);
+
+  char topic[64];
+  snprintf(topic, sizeof(topic), "station/%s/base", STATION_ID);
+
+  unsigned long flushStart = millis();
   int righeInviate = 0;
-  int righeRimaste = 0;
 
   while (file.available()) {
-    String rigaPayload = file.readStringUntil('\n');
-    rigaPayload.trim();
-    if (rigaPayload.length() == 0) continue;
-
-    if (righeInviate < MAX_RIGHE_SD_PER_CICLO) {
-      // Lotto corrente: tenta l'invio. Se il publish fallisce (es. la
-      // connessione MQTT è caduta proprio durante lo svuotamento), la
-      // riga NON viene scartata: si rimette in coda nel file temporaneo
-      // e verrà ritentata al prossimo ciclo.
-      if (mqtt.connected() && mqtt.publish(topic, rigaPayload.c_str())) {
-        Serial.println("[MQTT] Inviato storico da SD: " + rigaPayload);
-        righeInviate++;
-        delay(10); // Margine minimo per non sommergere il broker locale;
-                   // ridotto da 100ms, che con backlog ampi era la causa
-                   // principale dei 10-15 minuti di blocco.
-        continue;
-      } else {
-        Serial.println("[SD-RECOVERY] Invio fallito, la riga resta in coda.");
-        // Non viene incrementato righeInviate: la riga cade nel ramo
-        // sotto e viene riscritta nel file temporaneo.
-      }
+    if ((millis() - flushStart) >= SD_FLUSH_TIME_BUDGET_MS) {
+      break; // Budget di tempo esaurito: ci si ferma qui, l'offset resta
+             // esattamente alla riga corrente (non ancora consumata) e si
+             // riprenderà da lì al prossimo ciclo. NESSUNA riscrittura del
+             // resto del file: è questo che elimina il costo fisso di
+             // "ricopiare tutto" ad ogni singolo ciclo.
     }
 
-    // Righe oltre il lotto corrente (o non inviate per errore): si
-    // riscrivono nel file temporaneo per essere ritentate in seguito.
-    tempFile.println(rigaPayload);
-    righeRimaste++;
+    uint32_t posPrimaDiQuestaRiga = file.position();
+    String rigaPayload = file.readStringUntil('\n');
+    rigaPayload.trim();
+
+    if (rigaPayload.length() == 0) {
+      sdReadOffset = file.position(); // Riga vuota: la si considera comunque consumata.
+      continue;
+    }
+
+    if (mqtt.connected() && mqtt.publish(topic, rigaPayload.c_str())) {
+      Serial.println("[MQTT] Inviato storico da SD: " + rigaPayload);
+      righeInviate++;
+      sdReadOffset = file.position(); // Avanza l'offset SOLO dopo un invio
+                                       // riuscito: se la connessione cade
+                                       // a metà, la riga non ancora
+                                       // inviata verrà ritentata dal
+                                       // prossimo ciclo (l'offset resta
+                                       // fermo a prima di questa riga).
+      delay(SD_FLUSH_DELAY_MS); // Pausa tra un invio e l'altro per non
+                                 // affogare la pipeline Mosquitto->
+                                 // Telegraf->InfluxDB->Grafana.
+      continue;
+    }
+
+    // Invio fallito: ci si ferma qui SENZA avanzare l'offset oltre questa
+    // riga, cosi' verrà ritentata al prossimo ciclo.
+    Serial.println("[SD-RECOVERY] Invio fallito, mi fermo qui per questo ciclo.");
+    (void)posPrimaDiQuestaRiga;
+    break;
   }
 
   file.close();
-  tempFile.close();
 
-  // Sostituzione sicura: solo ora che il nuovo file con le righe residue
-  // è stato scritto e chiuso correttamente, si rimuove il vecchio backup
-  // e si rinomina il temporaneo al suo posto.
-  SD.remove("/backup.jsonl");
-  if (righeRimaste > 0) {
-    SD.rename("/backup.tmp", "/backup.jsonl");
-    Serial.printf("[SD-RECOVERY] Lotto inviato: %d righe. Ancora in coda: %d righe (continuerà nei prossimi cicli).\n",
-                  righeInviate, righeRimaste);
-  } else {
-    SD.remove("/backup.tmp");
+  if (sdReadOffset >= fileSize) {
+    // Il file è stato interamente processato in questo ciclo: elimina
+    // subito, non serve nemmeno aspettare la prossima compattazione.
+    SD.remove("/backup.jsonl");
+    sdReadOffset = 0;
     Serial.printf("[SD-RECOVERY] Lotto inviato: %d righe. Coda SD completamente svuotata.\n", righeInviate);
+    return;
+  }
+
+  Serial.printf("[SD-RECOVERY] Lotto inviato: %d righe. Offset avanzato a %u/%u byte (continuerà nei prossimi cicli).\n",
+                righeInviate, sdReadOffset, fileSize);
+
+  // --- Compattazione periodica (non ad ogni ciclo!) ---
+  // Se abbiamo "consumato" (inviato) abbastanza byte dall'inizio del file,
+  // conviene ricopiare fisicamente solo il residuo non ancora inviato in un
+  // nuovo file, cosi' da liberare spazio su SD e riportare l'offset a 0.
+  // Questo costa una copia dell'intero residuo, ma lo facciamo raramente
+  // (ogni ~200KB consumati) invece che ad ogni singolo ciclo: il costo si
+  // ammortizza su decine di cicli invece di gravare su ognuno.
+  if (sdReadOffset >= SD_COMPACT_THRESHOLD_BYTES) {
+    Serial.println("[SD-RECOVERY] Compattazione file di backup in corso...");
+
+    File src = SD.open("/backup.jsonl", FILE_READ);
+    if (!src) {
+      Serial.println("[SD-RECOVERY] Errore apertura file per compattazione, rimando al prossimo ciclo.");
+      return;
+    }
+    src.seek(sdReadOffset);
+
+    if (SD.exists("/backup.tmp")) SD.remove("/backup.tmp");
+    File dst = SD.open("/backup.tmp", FILE_WRITE);
+    if (!dst) {
+      Serial.println("[SD-RECOVERY] Errore creazione file temporaneo per compattazione.");
+      src.close();
+      return;
+    }
+
+    static uint8_t buf[4096];
+    int n;
+    while ((n = src.read(buf, sizeof(buf))) > 0) {
+      dst.write(buf, n);
+    }
+    src.close();
+    dst.close();
+
+    SD.remove("/backup.jsonl");
+    SD.rename("/backup.tmp", "/backup.jsonl");
+    sdReadOffset = 0; // Il nuovo file parte da zero: tutto il residuo
+                       // non ancora inviato è ora all'inizio del file.
+
+    Serial.println("[SD-RECOVERY] Compattazione completata.");
   }
 }
 
@@ -420,10 +520,18 @@ void goToDeepSleep(unsigned long cycleStartMillis) {
 
   uint64_t sleepUs = (elapsedUs < CYCLE_DURATION_US)
                         ? (CYCLE_DURATION_US - elapsedUs)
-                        : 0; // Se il ciclo attivo ha già superato i 10s,
-                             // dorme il minimo indispensabile (0 non è
-                             // valido per il timer, quindi si usa 1ms).
-  if (sleepUs == 0) sleepUs = 1000ULL;
+                        : 0; // Se il ciclo attivo ha già superato i 10s
+                             // (es. durante lo svuotamento di un grosso
+                             // backlog SD), si applica comunque uno sleep
+                             // minimo qui sotto, invece di richiudere il
+                             // ciclo quasi a 0ms — così il dispositivo
+                             // "respira" sempre un minimo anche durante
+                             // uno svuotamento lungo, invece di restare
+                             // sempre completamente sveglio.
+  const uint64_t MIN_SLEEP_US = 2000000ULL; // 2s minimi di sonno per ciclo,
+                                             // anche quando il ciclo attivo
+                                             // ha già superato i 10s target.
+  if (sleepUs < MIN_SLEEP_US) sleepUs = MIN_SLEEP_US;
 
   Serial.printf("[SLEEP] Ciclo attivo: %lums. Deep sleep per %llums.\n",
                 elapsedMs, sleepUs / 1000ULL);
@@ -453,11 +561,21 @@ void setup() {
   // SD durante le interruzioni di rete).
   configTime(GMT_OFFSET_SEC, DAYLIGHT_OFFSET_SEC, NTP_SERVER, "pool.ntp.org", "time.cloudflare.com");
 
+  // Pin I2C custom (SDA=4, SCL=5) - vanno impostati PRIMA di bmp.begin(),
+  // che internamente usa Wire senza parametri e quindi userebbe i pin
+  // di default se non specificati qui.
+  Wire.begin(I2C_SDA, I2C_SCL);
+
   if (!bmp.begin()) {
     Serial.println("[HARDWARE] BMP180 non rilevato!");
   } else {
     Serial.println("[HARDWARE] BMP180 pronto.");
   }
+
+  // Pin SPI custom (MISO=16, CLK=17, MOSI=15, CS=18) - vanno impostati
+  // PRIMA di SD.begin(), che userebbe altrimenti i pin SPI di default
+  // della board.
+  SPI.begin(SPI_CLK, SPI_MISO, SPI_MOSI, chipSelect);
 
   Serial.print("[HARDWARE] Inizializzazione modulo SD... ");
   if (!SD.begin(chipSelect)) {

@@ -1,95 +1,67 @@
-// ===========================================
-// LegmaMiteo Firmware — ESP32
-// Modalità: dati simulati (no sensori)
-// ===========================================
-
-#include <Arduino.h>
 #include <WiFi.h>
-#include <PubSubClient.h>
-#include <ArduinoJson.h>
-#include "secrets.h"
-
-// --- Configurazione ---
-const int   SEND_INTERVAL = 30000; // ms tra un invio e l'altro
-
-// --- Oggetti ---
-WiFiClient wifiClient;
-PubSubClient mqtt(wifiClient);
-
-// --- Connessione WiFi ---
-void connectWifi() {
-  Serial.print("Connessione WiFi");
-  WiFi.begin(WIFI_SSID, WIFI_PASSWORD);
-  while (WiFi.status() != WL_CONNECTED) {
-    delay(500);
-    Serial.print(".");
-  }
-  Serial.println("\nWiFi connesso — IP: " + WiFi.localIP().toString());
-}
-
-// --- Connessione MQTT ---
-void connectMqtt() {
-  while (!mqtt.connected()) {
-    Serial.print("Connessione MQTT...");
-
-    if (mqtt.connect(STATION_ID, MQTT_USER, MQTT_PASSWORD)) {
-      Serial.println("OK");
-    } else {
-      Serial.print("Fallita, errore=");
-      Serial.print(mqtt.state());
-      Serial.println(" retry tra 5s");
-      delay(5000);
-    }
-  }
-}
-
-// --- Genera e invia dati simulati ---
-void sendData() {
-  // Valori random realistici
-  float temp     = 15.0 + random(0, 150) / 10.0;   // 15-30°C
-  float humidity = 40.0 + random(0, 500) / 10.0;   // 40-90%
-  float pressure = 1000.0 + random(0, 300) / 10.0; // 1000-1030 hPa
-  float lux      = random(0, 100000);               // 0-100k lux
-  float wind     = random(0, 500) / 10.0;           // 0-50 km/h
-  float wind_dir = random(0, 360);                  // 0-360°
-  float rain     = random(0, 20) / 10.0;            // 0-2 mm
-
-  // Costruisci JSON
-  JsonDocument doc;
-  doc["station_id"]      = STATION_ID;
-  doc["temperature"]     = temp;
-  doc["humidity"]        = humidity;
-  doc["pressure"]        = pressure;
-  doc["lux"]             = lux;
-  doc["wind_speed"]      = wind;
-  doc["wind_direction"]  = wind_dir;
-  doc["rain_mm"]         = rain;
-
-  char payload[256];
-  serializeJson(doc, payload);
-
-  // Topic MQTT
-  char topic[64];
-  snprintf(topic, sizeof(topic), "station/%s/base", STATION_ID);
-
-  mqtt.publish(topic, payload);
-  Serial.println("Inviato: " + String(payload));
-}
 
 void setup() {
   Serial.begin(115200);
-  connectWifi();
-  mqtt.setServer(MQTT_HOST, MQTT_PORT);
-  connectMqtt();
+  delay(2000); // tempo per aprire il monitor seriale
+
+  Serial.println("\n\n=== VERIFICA BOARD ESP32-S3 N16R8 ===");
+
+  // --- Controllo PSRAM ---
+  if (psramFound()) {
+    Serial.printf("✅ PSRAM trovata: %d bytes (%.2f MB)\n",
+                  ESP.getPsramSize(), ESP.getPsramSize() / (1024.0 * 1024.0));
+  } else {
+    Serial.println("❌ PSRAM NON trovata! Controlla board_build.arduino.memory_type = qio_opi nel platformio.ini");
+  }
+
+  // --- Controllo Flash ---
+  uint32_t flashSize = ESP.getFlashChipSize();
+  Serial.printf("Flash size rilevata: %d bytes (%.2f MB)\n",
+                flashSize, flashSize / (1024.0 * 1024.0));
+  if (flashSize < 15 * 1024 * 1024) {
+    Serial.println("⚠️  Flash size sembra inferiore a 16MB - controlla board_build.flash_size nel platformio.ini");
+  } else {
+    Serial.println("✅ Flash size corretta (16MB)");
+  }
+
+  // --- Info chip generali ---
+  Serial.printf("Chip model: %s\n", ESP.getChipModel());
+  Serial.printf("Chip revision: %d\n", ESP.getChipRevision());
+  Serial.printf("CPU freq: %d MHz\n", ESP.getCpuFreqMhz());
+  Serial.printf("SDK version: %s\n", ESP.getSdkVersion());
+
+  Serial.println("\n=== TEST ANTENNA WIFI (scan ogni 5s) ===");
+
+  WiFi.mode(WIFI_STA);
+  WiFi.disconnect();
+  delay(100);
 }
 
 void loop() {
-  if (!mqtt.connected()) connectMqtt();
-  mqtt.loop();
+  Serial.println("\n--- Nuova scansione ---");
+  int n = WiFi.scanNetworks();
 
-  static unsigned long lastSend = 0;
-  if (millis() - lastSend >= SEND_INTERVAL) {
-    lastSend = millis();
-    sendData();
+  if (n == 0) {
+    Serial.println("❌ Nessuna rete trovata! Controlla antenna/connettore IPEX.");
+  } else {
+    Serial.printf("Trovate %d reti:\n", n);
+    for (int i = 0; i < n; i++) {
+      int rssi = WiFi.RSSI(i);
+      String qualita;
+      if (rssi > -50) qualita = "OTTIMO";
+      else if (rssi > -60) qualita = "BUONO";
+      else if (rssi > -70) qualita = "DISCRETO";
+      else if (rssi > -80) qualita = "DEBOLE";
+      else qualita = "MOLTO DEBOLE";
+
+      Serial.printf("%2d) %-30s RSSI: %4d dBm  Ch:%2d  [%s]\n",
+                    i + 1,
+                    WiFi.SSID(i).c_str(),
+                    rssi,
+                    WiFi.channel(i),
+                    qualita.c_str());
+    }
   }
+  WiFi.scanDelete();
+  delay(5000);
 }
