@@ -1,0 +1,25 @@
+name: Release Installer
+
+on:
+  push:
+    tags:
+      - 'v*'
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Verifica presenza install.sh
+        run: test -f deploy/install.sh
+
+      - name: Crea Release e allega install.sh
+        uses: softprops/action-gh-release@v2
+        with:
+          files: deploy/install.sh
+          generate_release_notes: true
