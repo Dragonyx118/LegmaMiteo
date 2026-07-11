@@ -22,13 +22,230 @@
   "links": [],
   "panels": [
     {
+      "collapsed": false,
+      "gridPos": {
+        "h": 1,
+        "w": 24,
+        "x": 0,
+        "y": 0
+      },
+      "id": 100,
+      "panels": [],
+      "title": "📡 Stato Rete",
+      "type": "row"
+    },
+    {
       "datasource": {
         "type": "influxdb",
-        "uid": "bfppqcas4iewwc"
+        "uid": "afrpmft5s97uod"
       },
       "fieldConfig": {
         "defaults": {
           "mappings": [],
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "red",
+                "value": null
+              },
+              {
+                "color": "green",
+                "value": 1
+              }
+            ]
+          },
+          "unit": "none"
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 3,
+        "w": 4,
+        "x": 0,
+        "y": 1
+      },
+      "id": 101,
+      "options": {
+        "colorMode": "background",
+        "graphMode": "none",
+        "justifyMode": "auto",
+        "orientation": "auto",
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        },
+        "showPercentChange": false,
+        "textMode": "auto",
+        "wideLayout": true
+      },
+      "pluginVersion": "10.4.0",
+      "targets": [
+        {
+          "datasource": {
+            "type": "influxdb",
+            "uid": "afrpmft5s97uod"
+          },
+          "query": "from(bucket: \"stations\")\n  |> range(start: -5m)\n  |> filter(fn: (r) => r._measurement == \"weather_station\" and r._field == \"temperature\")\n  |> filter(fn: (r) => r.station_id =~ /^${station:regex}$/)\n  |> group()\n  |> distinct(column: \"station_id\")\n  |> count()",
+          "refId": "A"
+        }
+      ],
+      "title": "🟢 Stazioni Attive (5m)",
+      "type": "stat"
+    },
+    {
+      "datasource": {
+        "type": "influxdb",
+        "uid": "afrpmft5s97uod"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "mappings": [],
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              },
+              {
+                "color": "yellow",
+                "value": 60
+              },
+              {
+                "color": "orange",
+                "value": 300
+              },
+              {
+                "color": "red",
+                "value": 900
+              }
+            ]
+          },
+          "unit": "s"
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 3,
+        "w": 4,
+        "x": 4,
+        "y": 1
+      },
+      "id": 102,
+      "options": {
+        "colorMode": "background",
+        "graphMode": "none",
+        "justifyMode": "auto",
+        "orientation": "auto",
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        },
+        "showPercentChange": false,
+        "textMode": "auto",
+        "wideLayout": true
+      },
+      "pluginVersion": "10.4.0",
+      "targets": [
+        {
+          "datasource": {
+            "type": "influxdb",
+            "uid": "afrpmft5s97uod"
+          },
+          "query": "from(bucket: \"stations\")\n  |> range(start: -24h)\n  |> filter(fn: (r) => r._measurement == \"weather_station\" and r._field == \"temperature\")\n  |> filter(fn: (r) => r.station_id =~ /^${station:regex}$/)\n  |> last()\n  |> map(fn: (r) => ({ r with _value: float(v: int(v: now()) - int(v: r._time)) / 1000000000.0 }))\n  |> keep(columns: [\"_value\"])",
+          "refId": "A"
+        }
+      ],
+      "title": "⏱️ Ultimo Dato Ricevuto",
+      "type": "stat"
+    },
+    {
+      "datasource": {
+        "type": "influxdb",
+        "uid": "afrpmft5s97uod"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "color": {
+            "mode": "thresholds"
+          },
+          "mappings": [],
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "text",
+                "value": null
+              }
+            ]
+          }
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 3,
+        "w": 4,
+        "x": 8,
+        "y": 1
+      },
+      "id": 103,
+      "options": {
+        "colorMode": "value",
+        "graphMode": "none",
+        "justifyMode": "auto",
+        "orientation": "auto",
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        },
+        "showPercentChange": false,
+        "textMode": "name",
+        "wideLayout": true
+      },
+      "pluginVersion": "10.4.0",
+      "targets": [
+        {
+          "datasource": {
+            "type": "influxdb",
+            "uid": "afrpmft5s97uod"
+          },
+          "query": "from(bucket: \"stations\")\n  |> range(start: -24h)\n  |> filter(fn: (r) => r._measurement == \"weather_station\" and r._field == \"temperature\")\n  |> filter(fn: (r) => r.station_id =~ /^${station:regex}$/)\n  |> last()\n  |> keep(columns: [\"_value\", \"station_id\"])",
+          "refId": "A"
+        }
+      ],
+      "title": "🏷️ Stazione Selezionata",
+      "type": "stat"
+    },
+    {
+      "datasource": {
+        "type": "influxdb",
+        "uid": "afrpmft5s97uod"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "mappings": [
+            {
+              "type": "range",
+              "options": {
+                "from": -50,
+                "to": -15,
+                "result": {
+                  "text": "⚠️ Sensore anomalo",
+                  "color": "red"
+                }
+              }
+            }
+          ],
           "max": 60,
           "min": -30,
           "thresholds": {
@@ -60,7 +277,7 @@
         "h": 4,
         "w": 4,
         "x": 0,
-        "y": 0
+        "y": 4
       },
       "id": 1,
       "options": {
@@ -83,9 +300,9 @@
         {
           "datasource": {
             "type": "influxdb",
-            "uid": "bfppqcas4iewwc"
+            "uid": "afrpmft5s97uod"
           },
-          "query": "from(bucket: \"stations\")\n  |> range(start: v.timeRangeStart, stop: v.timeRangeStop)\n  |> filter(fn: (r) => r._measurement == \"weather_station\")\n  |> filter(fn: (r) => r._field == \"temperature\")\n  |> last()",
+          "query": "from(bucket: \"stations\")\n  |> range(start: v.timeRangeStart, stop: v.timeRangeStop)\n  |> filter(fn: (r) => r._measurement == \"weather_station\")\n  |> filter(fn: (r) => r.station_id =~ /^${station:regex}$/)\n  |> filter(fn: (r) => r._field == \"temperature\")\n  |> last()",
           "refId": "A"
         }
       ],
@@ -95,7 +312,7 @@
     {
       "datasource": {
         "type": "influxdb",
-        "uid": "bfppqcas4iewwc"
+        "uid": "afrpmft5s97uod"
       },
       "fieldConfig": {
         "defaults": {
@@ -131,7 +348,7 @@
         "h": 4,
         "w": 4,
         "x": 4,
-        "y": 0
+        "y": 4
       },
       "id": 2,
       "options": {
@@ -154,9 +371,9 @@
         {
           "datasource": {
             "type": "influxdb",
-            "uid": "bfppqcas4iewwc"
+            "uid": "afrpmft5s97uod"
           },
-          "query": "from(bucket: \"stations\")\n  |> range(start: v.timeRangeStart, stop: v.timeRangeStop)\n  |> filter(fn: (r) => r._measurement == \"weather_station\")\n  |> filter(fn: (r) => r._field == \"humidity\")\n  |> last()",
+          "query": "from(bucket: \"stations\")\n  |> range(start: v.timeRangeStart, stop: v.timeRangeStop)\n  |> filter(fn: (r) => r._measurement == \"weather_station\")\n  |> filter(fn: (r) => r.station_id =~ /^${station:regex}$/)\n  |> filter(fn: (r) => r._field == \"humidity\")\n  |> last()",
           "refId": "A"
         }
       ],
@@ -166,11 +383,23 @@
     {
       "datasource": {
         "type": "influxdb",
-        "uid": "bfppqcas4iewwc"
+        "uid": "afrpmft5s97uod"
       },
       "fieldConfig": {
         "defaults": {
-          "mappings": [],
+          "mappings": [
+            {
+              "type": "range",
+              "options": {
+                "from": 1200,
+                "to": 3000,
+                "result": {
+                  "text": "⚠️ Sensore anomalo",
+                  "color": "red"
+                }
+              }
+            }
+          ],
           "max": 1050,
           "min": 950,
           "thresholds": {
@@ -198,7 +427,7 @@
         "h": 4,
         "w": 4,
         "x": 8,
-        "y": 0
+        "y": 4
       },
       "id": 3,
       "options": {
@@ -221,9 +450,9 @@
         {
           "datasource": {
             "type": "influxdb",
-            "uid": "bfppqcas4iewwc"
+            "uid": "afrpmft5s97uod"
           },
-          "query": "from(bucket: \"stations\")\n  |> range(start: v.timeRangeStart, stop: v.timeRangeStop)\n  |> filter(fn: (r) => r._measurement == \"weather_station\")\n  |> filter(fn: (r) => r._field == \"pressure\")\n  |> last()",
+          "query": "from(bucket: \"stations\")\n  |> range(start: v.timeRangeStart, stop: v.timeRangeStop)\n  |> filter(fn: (r) => r._measurement == \"weather_station\")\n  |> filter(fn: (r) => r.station_id =~ /^${station:regex}$/)\n  |> filter(fn: (r) => r._field == \"pressure\")\n  |> last()",
           "refId": "A"
         }
       ],
@@ -233,7 +462,7 @@
     {
       "datasource": {
         "type": "influxdb",
-        "uid": "bfppqcas4iewwc"
+        "uid": "afrpmft5s97uod"
       },
       "fieldConfig": {
         "defaults": {
@@ -269,7 +498,7 @@
         "h": 4,
         "w": 4,
         "x": 12,
-        "y": 0
+        "y": 4
       },
       "id": 4,
       "options": {
@@ -292,9 +521,9 @@
         {
           "datasource": {
             "type": "influxdb",
-            "uid": "bfppqcas4iewwc"
+            "uid": "afrpmft5s97uod"
           },
-          "query": "from(bucket: \"stations\")\n  |> range(start: v.timeRangeStart, stop: v.timeRangeStop)\n  |> filter(fn: (r) => r._measurement == \"weather_station\")\n  |> filter(fn: (r) => r._field == \"lux\")\n  |> last()",
+          "query": "from(bucket: \"stations\")\n  |> range(start: v.timeRangeStart, stop: v.timeRangeStop)\n  |> filter(fn: (r) => r._measurement == \"weather_station\")\n  |> filter(fn: (r) => r.station_id =~ /^${station:regex}$/)\n  |> filter(fn: (r) => r._field == \"lux\")\n  |> last()",
           "refId": "A"
         }
       ],
@@ -304,7 +533,7 @@
     {
       "datasource": {
         "type": "influxdb",
-        "uid": "bfppqcas4iewwc"
+        "uid": "afrpmft5s97uod"
       },
       "fieldConfig": {
         "defaults": {
@@ -340,7 +569,7 @@
         "h": 4,
         "w": 4,
         "x": 16,
-        "y": 0
+        "y": 4
       },
       "id": 5,
       "options": {
@@ -363,9 +592,9 @@
         {
           "datasource": {
             "type": "influxdb",
-            "uid": "bfppqcas4iewwc"
+            "uid": "afrpmft5s97uod"
           },
-          "query": "from(bucket: \"stations\")\n  |> range(start: v.timeRangeStart, stop: v.timeRangeStop)\n  |> filter(fn: (r) => r._measurement == \"weather_station\")\n  |> filter(fn: (r) => r._field == \"wind_speed\")\n  |> last()",
+          "query": "from(bucket: \"stations\")\n  |> range(start: v.timeRangeStart, stop: v.timeRangeStop)\n  |> filter(fn: (r) => r._measurement == \"weather_station\")\n  |> filter(fn: (r) => r.station_id =~ /^${station:regex}$/)\n  |> filter(fn: (r) => r._field == \"wind_speed\")\n  |> last()",
           "refId": "A"
         }
       ],
@@ -375,7 +604,7 @@
     {
       "datasource": {
         "type": "influxdb",
-        "uid": "bfppqcas4iewwc"
+        "uid": "afrpmft5s97uod"
       },
       "fieldConfig": {
         "defaults": {
@@ -405,7 +634,7 @@
         "h": 4,
         "w": 4,
         "x": 20,
-        "y": 0
+        "y": 4
       },
       "id": 6,
       "options": {
@@ -429,9 +658,9 @@
         {
           "datasource": {
             "type": "influxdb",
-            "uid": "bfppqcas4iewwc"
+            "uid": "afrpmft5s97uod"
           },
-          "query": "from(bucket: \"stations\")\n  |> range(start: v.timeRangeStart, stop: v.timeRangeStop)\n  |> filter(fn: (r) => r._measurement == \"weather_station\")\n  |> filter(fn: (r) => r._field == \"rain_mm\")\n  |> sum()",
+          "query": "from(bucket: \"stations\")\n  |> range(start: v.timeRangeStart, stop: v.timeRangeStop)\n  |> filter(fn: (r) => r._measurement == \"weather_station\")\n  |> filter(fn: (r) => r.station_id =~ /^${station:regex}$/)\n  |> filter(fn: (r) => r._field == \"rain_mm\")\n  |> sum()",
           "refId": "A"
         }
       ],
@@ -441,7 +670,7 @@
     {
       "datasource": {
         "type": "influxdb",
-        "uid": "bfppqcas4iewwc"
+        "uid": "afrpmft5s97uod"
       },
       "fieldConfig": {
         "defaults": {
@@ -503,7 +732,7 @@
         "h": 8,
         "w": 12,
         "x": 0,
-        "y": 4
+        "y": 8
       },
       "id": 7,
       "options": {
@@ -522,9 +751,9 @@
         {
           "datasource": {
             "type": "influxdb",
-            "uid": "bfppqcas4iewwc"
+            "uid": "afrpmft5s97uod"
           },
-          "query": "from(bucket: \"stations\")\n  |> range(start: v.timeRangeStart, stop: v.timeRangeStop)\n  |> filter(fn: (r) => r._measurement == \"weather_station\")\n  |> filter(fn: (r) => r._field == \"temperature\")\n  |> aggregateWindow(every: v.windowPeriod, fn: mean, createEmpty: false)\n",
+          "query": "from(bucket: \"stations\")\n  |> range(start: v.timeRangeStart, stop: v.timeRangeStop)\n  |> filter(fn: (r) => r._measurement == \"weather_station\")\n  |> filter(fn: (r) => r.station_id =~ /^${station:regex}$/)\n  |> filter(fn: (r) => r._field == \"temperature\")\n  |> aggregateWindow(every: v.windowPeriod, fn: mean, createEmpty: false)\n",
           "refId": "A"
         }
       ],
@@ -534,7 +763,7 @@
     {
       "datasource": {
         "type": "influxdb",
-        "uid": "bfppqcas4iewwc"
+        "uid": "afrpmft5s97uod"
       },
       "fieldConfig": {
         "defaults": {
@@ -597,7 +826,7 @@
         "h": 8,
         "w": 6,
         "x": 12,
-        "y": 4
+        "y": 8
       },
       "id": 8,
       "options": {
@@ -616,9 +845,9 @@
         {
           "datasource": {
             "type": "influxdb",
-            "uid": "bfppqcas4iewwc"
+            "uid": "afrpmft5s97uod"
           },
-          "query": "from(bucket: \"stations\")\n  |> range(start: v.timeRangeStart, stop: v.timeRangeStop)\n  |> filter(fn: (r) => r._measurement == \"weather_station\")\n  |> filter(fn: (r) => r._field == \"humidity\")\n  |> aggregateWindow(every: v.windowPeriod, fn: mean, createEmpty: false)\n",
+          "query": "from(bucket: \"stations\")\n  |> range(start: v.timeRangeStart, stop: v.timeRangeStop)\n  |> filter(fn: (r) => r._measurement == \"weather_station\")\n  |> filter(fn: (r) => r.station_id =~ /^${station:regex}$/)\n  |> filter(fn: (r) => r._field == \"humidity\")\n  |> aggregateWindow(every: v.windowPeriod, fn: mean, createEmpty: false)\n",
           "refId": "A"
         }
       ],
@@ -628,7 +857,7 @@
     {
       "datasource": {
         "type": "influxdb",
-        "uid": "bfppqcas4iewwc"
+        "uid": "afrpmft5s97uod"
       },
       "fieldConfig": {
         "defaults": {
@@ -692,7 +921,7 @@
         "h": 8,
         "w": 6,
         "x": 18,
-        "y": 4
+        "y": 8
       },
       "id": 11,
       "options": {
@@ -711,9 +940,9 @@
         {
           "datasource": {
             "type": "influxdb",
-            "uid": "bfppqcas4iewwc"
+            "uid": "afrpmft5s97uod"
           },
-          "query": "from(bucket: \"stations\")\n  |> range(start: v.timeRangeStart, stop: v.timeRangeStop)\n  |> filter(fn: (r) => r._measurement == \"weather_station\")\n  |> filter(fn: (r) => r._field == \"pressure\")\n  |> aggregateWindow(every: v.windowPeriod, fn: mean, createEmpty: false)\n",
+          "query": "from(bucket: \"stations\")\n  |> range(start: v.timeRangeStart, stop: v.timeRangeStop)\n  |> filter(fn: (r) => r._measurement == \"weather_station\")\n  |> filter(fn: (r) => r.station_id =~ /^${station:regex}$/)\n  |> filter(fn: (r) => r._field == \"pressure\")\n  |> aggregateWindow(every: v.windowPeriod, fn: mean, createEmpty: false)\n",
           "refId": "A"
         }
       ],
@@ -723,7 +952,7 @@
     {
       "datasource": {
         "type": "influxdb",
-        "uid": "bfppqcas4iewwc"
+        "uid": "afrpmft5s97uod"
       },
       "fieldConfig": {
         "defaults": {
@@ -784,7 +1013,7 @@
         "h": 8,
         "w": 12,
         "x": 0,
-        "y": 12
+        "y": 16
       },
       "id": 9,
       "options": {
@@ -803,9 +1032,9 @@
         {
           "datasource": {
             "type": "influxdb",
-            "uid": "bfppqcas4iewwc"
+            "uid": "afrpmft5s97uod"
           },
-          "query": "from(bucket: \"stations\")\n  |> range(start: v.timeRangeStart, stop: v.timeRangeStop)\n  |> filter(fn: (r) => r._measurement == \"weather_station\")\n  |> filter(fn: (r) => r._field == \"wind_speed\" or r._field == \"wind_direction\")\n  |> aggregateWindow(every: v.windowPeriod, fn: mean, createEmpty: false)\n",
+          "query": "from(bucket: \"stations\")\n  |> range(start: v.timeRangeStart, stop: v.timeRangeStop)\n  |> filter(fn: (r) => r._measurement == \"weather_station\")\n  |> filter(fn: (r) => r.station_id =~ /^${station:regex}$/)\n  |> filter(fn: (r) => r._field == \"wind_speed\" or r._field == \"wind_direction\")\n  |> aggregateWindow(every: v.windowPeriod, fn: mean, createEmpty: false)\n",
           "refId": "A"
         }
       ],
@@ -815,7 +1044,7 @@
     {
       "datasource": {
         "type": "influxdb",
-        "uid": "bfppqcas4iewwc"
+        "uid": "afrpmft5s97uod"
       },
       "fieldConfig": {
         "defaults": {
@@ -866,7 +1095,7 @@
         "h": 8,
         "w": 12,
         "x": 12,
-        "y": 12
+        "y": 16
       },
       "id": 10,
       "options": {
@@ -894,9 +1123,9 @@
         {
           "datasource": {
             "type": "influxdb",
-            "uid": "bfppqcas4iewwc"
+            "uid": "afrpmft5s97uod"
           },
-          "query": "from(bucket: \"stations\")\n  |> range(start: v.timeRangeStart, stop: v.timeRangeStop)\n  |> filter(fn: (r) => r._measurement == \"weather_station\")\n  |> filter(fn: (r) => r._field == \"rain_mm\")\n  |> aggregateWindow(every: 5m, fn: sum)",
+          "query": "from(bucket: \"stations\")\n  |> range(start: v.timeRangeStart, stop: v.timeRangeStop)\n  |> filter(fn: (r) => r._measurement == \"weather_station\")\n  |> filter(fn: (r) => r.station_id =~ /^${station:regex}$/)\n  |> filter(fn: (r) => r._field == \"rain_mm\")\n  |> aggregateWindow(every: 5m, fn: sum)",
           "refId": "A"
         }
       ],
@@ -906,9 +1135,37 @@
   ],
   "refresh": "10s",
   "schemaVersion": 39,
-  "tags": [],
+  "tags": [
+    "legmamiteo",
+    "weather",
+    "base"
+  ],
   "templating": {
-    "list": []
+    "list": [
+      {
+        "current": {
+          "text": "All",
+          "value": "$__all"
+        },
+        "datasource": {
+          "type": "influxdb",
+          "uid": "afrpmft5s97uod"
+        },
+        "definition": "import \"influxdata/influxdb/schema\"\nschema.tagValues(bucket: \"stations\", tag: \"station_id\", predicate: (r) => r._measurement == \"weather_station\", start: -30d)",
+        "hide": 0,
+        "includeAll": true,
+        "label": "Stazione",
+        "multi": true,
+        "name": "station",
+        "options": [],
+        "query": "import \"influxdata/influxdb/schema\"\nschema.tagValues(bucket: \"stations\", tag: \"station_id\", predicate: (r) => r._measurement == \"weather_station\", start: -30d)",
+        "refresh": 2,
+        "regex": "",
+        "skipUrlSync": false,
+        "sort": 1,
+        "type": "query"
+      }
+    ]
   },
   "time": {
     "from": "now-1h",
@@ -919,5 +1176,6 @@
   "title": "LegmaMiteo — BASE Station",
   "uid": "legmamiteo-base",
   "version": 1,
-  "weekStart": ""
+  "weekStart": "",
+  "description": "Dashboard stazione meteo LegmaMiteo — dati live e storici, con stato connettività."
 }

@@ -5,18 +5,53 @@
 
 services:
 
-  # --- MQTT Broker ---
+  # --- Tailscale sidecar (espone Mosquitto via Funnel) ---
+  tailscale:
+    image: tailscale/tailscale:latest
+    container_name: legmamiteo-tailscale
+    hostname: legmamiteo-server
+    environment:
+      - TS_AUTHKEY=${TS_AUTHKEY}
+      - TS_HOSTNAME=legmamiteo-server
+      - TS_STATE_DIR=/var/lib/tailscale
+      - TS_USERSPACE=false
+      - TS_EXTRA_ARGS=--accept-dns=false
+    volumes:
+      - tailscale-state:/var/lib/tailscale
+      - /dev/net/tun:/dev/net/tun
+    cap_add:
+      - NET_ADMIN
+      - NET_RAW
+    restart: unless-stopped
+    networks:
+      - legmamiteo-network
+
+  # --- MQTT Broker (condivide network stack con tailscale per il Funnel) ---
   mosquitto:
     image: eclipse-mosquitto:2
     container_name: legmamiteo-mosquitto
+    user: root
     ports:
       - "1883:1883"
-      # - "1884:1884"  # Future LoRaWAN port
     volumes:
       - ./mosquitto/config:/mosquitto/config
       - ./mosquitto/data:/mosquitto/data
       - ./mosquitto/log:/mosquitto/log
     restart: unless-stopped
+    networks:
+      - legmamiteo-network
+
+  telegraf:
+    image: telegraf:1.30
+    container_name: legmamiteo-telegraf
+    volumes:
+      - ./telegraf/telegraf.conf:/etc/telegraf/telegraf.conf:ro
+    environment:
+      - INFLUX_TOKEN=${INFLUX_TOKEN}
+    restart: unless-stopped
+    depends_on:
+      - mosquitto
+      - influxdb
     networks:
       - legmamiteo-network
 
@@ -28,29 +63,6 @@ services:
       - "8086:8086"
     volumes:
       - ./influxdb:/var/lib/influxdb2
-    environment:
-      - DOCKER_INFLUXDB_INIT_MODE=setup
-      - DOCKER_INFLUXDB_INIT_USERNAME=admin
-      - DOCKER_INFLUXDB_INIT_PASSWORD=${INFLUXDB_ADMIN_PASSWORD}
-      - DOCKER_INFLUXDB_INIT_ORG=legmamiteo
-      - DOCKER_INFLUXDB_INIT_BUCKET=stations
-      - DOCKER_INFLUXDB_INIT_RETENTION=0
-      - DOCKER_INFLUXDB_INIT_ADMIN_TOKEN=${INFLUX_TOKEN}
-    restart: unless-stopped
-    networks:
-      - legmamiteo-network
-
-  # --- MQTT to InfluxDB Bridge ---
-  telegraf:
-    image: telegraf:1.30
-    container_name: legmamiteo-telegraf
-    depends_on:
-      - mosquitto
-      - influxdb
-    volumes:
-      - ./telegraf/telegraf.conf:/etc/telegraf/telegraf.conf:ro
-    environment:
-      - INFLUX_TOKEN=${INFLUX_TOKEN}
     restart: unless-stopped
     networks:
       - legmamiteo-network
@@ -62,7 +74,7 @@ services:
     ports:
       - "3000:3000"
     volumes:
-      - ./grafana:/var/lib/grafana
+      - grafana-data:/var/lib/grafana
     environment:
       - GF_SECURITY_ADMIN_USER=admin
       - GF_SECURITY_ADMIN_PASSWORD=${GRAFANA_ADMIN_PASSWORD}
@@ -93,3 +105,7 @@ services:
 networks:
   legmamiteo-network:
     name: legmamiteo-network
+
+volumes:
+  grafana-data:
+  tailscale-state:

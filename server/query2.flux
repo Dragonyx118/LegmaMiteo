@@ -1,0 +1,5 @@
+from(bucket:"stations")
+  |> range(start: -24h)
+  |> filter(fn: (r) => r._measurement == "weather_station")
+  |> group(columns: ["_field"])
+  |> distinct(column: "_field")

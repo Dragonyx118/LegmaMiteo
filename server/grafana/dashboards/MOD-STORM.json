@@ -24,7 +24,7 @@
     {
       "datasource": {
         "type": "influxdb",
-        "uid": "bfppqcas4iewwc"
+        "uid": "afrpmft5s97uod"
       },
       "fieldConfig": {
         "defaults": {
@@ -83,7 +83,7 @@
         {
           "datasource": {
             "type": "influxdb",
-            "uid": "bfppqcas4iewwc"
+            "uid": "afrpmft5s97uod"
           },
           "query": "from(bucket: \"stations\")\n  |> range(start: v.timeRangeStart, stop: v.timeRangeStop)\n  |> filter(fn: (r) => r._measurement == \"weather_station\")\n  |> filter(fn: (r) => r._field == \"lightning_distance\")\n  |> last()",
           "refId": "A"
@@ -95,7 +95,7 @@
     {
       "datasource": {
         "type": "influxdb",
-        "uid": "bfppqcas4iewwc"
+        "uid": "afrpmft5s97uod"
       },
       "fieldConfig": {
         "defaults": {
@@ -149,7 +149,7 @@
         {
           "datasource": {
             "type": "influxdb",
-            "uid": "bfppqcas4iewwc"
+            "uid": "afrpmft5s97uod"
           },
           "query": "from(bucket: \"stations\")\n  |> range(start: v.timeRangeStart, stop: v.timeRangeStop)\n  |> filter(fn: (r) => r._measurement == \"weather_station\")\n  |> filter(fn: (r) => r._field == \"lightning_distance\")\n  |> aggregateWindow(every: v.windowPeriod, fn: count, createEmpty: false)\n",
           "refId": "A"
@@ -161,7 +161,7 @@
     {
       "datasource": {
         "type": "influxdb",
-        "uid": "bfppqcas4iewwc"
+        "uid": "afrpmft5s97uod"
       },
       "fieldConfig": {
         "defaults": {
@@ -216,7 +216,7 @@
         {
           "datasource": {
             "type": "influxdb",
-            "uid": "bfppqcas4iewwc"
+            "uid": "afrpmft5s97uod"
           },
           "query": "from(bucket: \"stations\")\n  |> range(start: v.timeRangeStart, stop: v.timeRangeStop)\n  |> filter(fn: (r) => r._measurement == \"weather_station\")\n  |> filter(fn: (r) => r._field == \"pressure_hpa\")\n  |> last()",
           "refId": "A"
@@ -228,7 +228,7 @@
     {
       "datasource": {
         "type": "influxdb",
-        "uid": "bfppqcas4iewwc"
+        "uid": "afrpmft5s97uod"
       },
       "fieldConfig": {
         "defaults": {
@@ -287,7 +287,7 @@
         {
           "datasource": {
             "type": "influxdb",
-            "uid": "bfppqcas4iewwc"
+            "uid": "afrpmft5s97uod"
           },
           "query": "from(bucket: \"stations\")\n  |> range(start: v.timeRangeStart, stop: v.timeRangeStop)\n  |> filter(fn: (r) => r._measurement == \"weather_station\")\n  |> filter(fn: (r) => r._field == \"sky_temp\")\n  |> last()",
           "refId": "A"
@@ -299,7 +299,7 @@
     {
       "datasource": {
         "type": "influxdb",
-        "uid": "bfppqcas4iewwc"
+        "uid": "afrpmft5s97uod"
       },
       "fieldConfig": {
         "defaults": {
@@ -380,7 +380,7 @@
         {
           "datasource": {
             "type": "influxdb",
-            "uid": "bfppqcas4iewwc"
+            "uid": "afrpmft5s97uod"
           },
           "query": "from(bucket: \"stations\")\n  |> range(start: v.timeRangeStart, stop: v.timeRangeStop)\n  |> filter(fn: (r) => r._measurement == \"weather_station\")\n  |> filter(fn: (r) => r._field == \"lightning_distance\")\n  |> aggregateWindow(every: v.windowPeriod, fn: mean, createEmpty: false)\n",
           "refId": "A"
@@ -392,7 +392,7 @@
     {
       "datasource": {
         "type": "influxdb",
-        "uid": "bfppqcas4iewwc"
+        "uid": "afrpmft5s97uod"
       },
       "fieldConfig": {
         "defaults": {
@@ -473,7 +473,7 @@
         {
           "datasource": {
             "type": "influxdb",
-            "uid": "bfppqcas4iewwc"
+            "uid": "afrpmft5s97uod"
           },
           "query": "from(bucket: \"stations\")\n  |> range(start: v.timeRangeStart, stop: v.timeRangeStop)\n  |> filter(fn: (r) => r._measurement == \"weather_station\")\n  |> filter(fn: (r) => r._field == \"pressure_hpa\")\n  |> aggregateWindow(every: v.windowPeriod, fn: mean, createEmpty: false)\n",
           "refId": "A"
@@ -485,7 +485,7 @@
     {
       "datasource": {
         "type": "influxdb",
-        "uid": "bfppqcas4iewwc"
+        "uid": "afrpmft5s97uod"
       },
       "fieldConfig": {
         "defaults": {
@@ -566,7 +566,7 @@
         {
           "datasource": {
             "type": "influxdb",
-            "uid": "bfppqcas4iewwc"
+            "uid": "afrpmft5s97uod"
           },
           "query": "from(bucket: \"stations\")\n  |> range(start: v.timeRangeStart, stop: v.timeRangeStop)\n  |> filter(fn: (r) => r._measurement == \"weather_station\")\n  |> filter(fn: (r) => r._field == \"vibration\")\n  |> aggregateWindow(every: v.windowPeriod, fn: mean, createEmpty: false)\n",
           "refId": "A"

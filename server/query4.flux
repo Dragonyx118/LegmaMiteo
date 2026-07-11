@@ -1,6 +1,6 @@
 from(bucket:"stations")
-  |> range(start: -15m)
+  |> range(start: -24h)
   |> filter(fn: (r) => r._measurement == "weather_station")
   |> filter(fn: (r) => r._field == "temperature")
   |> sort(columns: ["_time"], desc: true)
-  |> limit(n:10)
+  |> limit(n: 5)
