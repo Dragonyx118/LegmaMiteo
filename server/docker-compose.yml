@@ -12,10 +12,9 @@ services:
     hostname: legmamiteo-server
     environment:
       - TS_AUTHKEY=${TS_AUTHKEY}
-      - TS_HOSTNAME=legmamiteo-server
       - TS_STATE_DIR=/var/lib/tailscale
       - TS_USERSPACE=false
-      - TS_EXTRA_ARGS=--accept-dns=false
+      - TS_EXTRA_ARGS=--accept-dns=false --reset
     volumes:
       - tailscale-state:/var/lib/tailscale
       - /dev/net/tun:/dev/net/tun
@@ -26,20 +25,18 @@ services:
     networks:
       - legmamiteo-network
 
-  # --- MQTT Broker (condivide network stack con tailscale per il Funnel) ---
   mosquitto:
     image: eclipse-mosquitto:2
     container_name: legmamiteo-mosquitto
     user: root
-    ports:
-      - "1883:1883"
+    network_mode: "service:tailscale"
     volumes:
       - ./mosquitto/config:/mosquitto/config
       - ./mosquitto/data:/mosquitto/data
       - ./mosquitto/log:/mosquitto/log
     restart: unless-stopped
-    networks:
-      - legmamiteo-network
+    depends_on:
+      - tailscale
 
   telegraf:
     image: telegraf:1.30
