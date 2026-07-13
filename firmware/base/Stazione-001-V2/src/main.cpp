@@ -199,6 +199,14 @@ void trySyncTime() {
 bool connectWifiCompleto() {
   Serial.print("[WiFi] Connessione completa in corso...");
   WiFi.mode(WIFI_STA);
+
+  // NOTA: qui avevamo forzato un DNS statico esterno (8.8.8.8 / 1.1.1.1)
+  // per accorciare il ritardo di risoluzione DNS al boot. Rimosso: sul
+  // router di questa rete, le query DNS dirette verso resolver esterni
+  // sembrano essere bloccate/filtrate (comune su alcuni router ISP),
+  // causando un fallimento DNS permanente invece del solo ritardo
+  // iniziale di ~30s che si aveva usando il DNS fornito dal router via
+  // DHCP. Si torna quindi al comportamento di default (DNS del router).
   WiFi.begin(WIFI_SSID, WIFI_PASSWORD);
 
   int attempts = 0;
@@ -296,8 +304,27 @@ bool assicuraConnessioneAttiva() {
   return false;
 }
 
-const unsigned long SD_FLUSH_TIME_BUDGET_MS = 3000;
+// --- Budget di flush ADATTIVO in base a quanto backlog resta da inviare ---
+// In condizioni normali (backlog piccolo o assente) il flush resta breve
+// e a basso consumo. Se il backlog è grande (es. dopo giorni di blackout
+// per un evento meteo estremo che ha tirato giù la linea), il budget si
+// allarga molto per recuperare aggressivamente, sfruttando il fatto che
+// la connessione MQTT è già stabile (niente più costo di handshake ad
+// ogni ciclo con l'architettura a connessione persistente). La lettura
+// live viene SEMPRE inviata prima di questo flush (vedi loop()), quindi
+// allargare questo budget non fa mai perdere un dato live: al massimo
+// allunga quel singolo ciclo, il prossimo campione arriverà con qualche
+// secondo di ritardo ma nessun dato va perso.
+const unsigned long SD_FLUSH_BUDGET_NORMALE_MS   = 600;    // backlog piccolo/assente
+const unsigned long SD_FLUSH_BUDGET_MEDIO_MS     = 3000;   // backlog moderato (minuti/poche ore)
+const unsigned long SD_FLUSH_BUDGET_AGGRESSIVO_MS = 8000;  // backlog enorme (giorni), lascia
+                                                             // comunque margine nel ciclo da 10s
+                                                             // per non bloccare mai del tutto
+const uint32_t SD_SOGLIA_BACKLOG_MEDIO_BYTES      = 50000;   // ~50KB
+const uint32_t SD_SOGLIA_BACKLOG_GRANDE_BYTES     = 500000;  // ~500KB
+
 const unsigned long SD_FLUSH_DELAY_MS = 50;
+const int SD_FLUSH_MAX_ROWS_PER_CYCLE_NORMALE = 10;
 
 void svuotaCodaSD() {
   if (!SD.exists("/backup.jsonl")) {
@@ -321,6 +348,25 @@ void svuotaCodaSD() {
     return;
   }
 
+  uint32_t backlogResiduo = fileSize - sdReadOffset;
+  unsigned long flushBudgetMs;
+  int maxRighePerCiclo;
+
+  if (backlogResiduo >= SD_SOGLIA_BACKLOG_GRANDE_BYTES) {
+    // Backlog enorme: modalità recupero aggressivo, nessun limite di
+    // righe (solo il budget di tempo conta), per svuotare il più
+    // possibile in ogni ciclo finché il backlog resta sopra soglia.
+    flushBudgetMs = SD_FLUSH_BUDGET_AGGRESSIVO_MS;
+    maxRighePerCiclo = INT32_MAX;
+    Serial.println("[SD-RECOVERY] Backlog enorme rilevato: modalità recupero aggressivo attiva.");
+  } else if (backlogResiduo >= SD_SOGLIA_BACKLOG_MEDIO_BYTES) {
+    flushBudgetMs = SD_FLUSH_BUDGET_MEDIO_MS;
+    maxRighePerCiclo = INT32_MAX;
+  } else {
+    flushBudgetMs = SD_FLUSH_BUDGET_NORMALE_MS;
+    maxRighePerCiclo = SD_FLUSH_MAX_ROWS_PER_CYCLE_NORMALE;
+  }
+
   Serial.printf("[SD-RECOVERY] Riprendo l'invio da offset %u/%u byte...\n", sdReadOffset, fileSize);
 
   file.seek(sdReadOffset);
@@ -332,7 +378,10 @@ void svuotaCodaSD() {
   int righeInviate = 0;
 
   while (file.available()) {
-    if ((millis() - flushStart) >= SD_FLUSH_TIME_BUDGET_MS) {
+    if ((millis() - flushStart) >= flushBudgetMs) {
+      break;
+    }
+    if (righeInviate >= maxRighePerCiclo) {
       break;
     }
 
@@ -499,6 +548,32 @@ void setup() {
 
   bool wifiOk = connectWifiCompleto();
   bool mqttOk = wifiOk && connectMqtt();
+
+  // Retry serrato SOLO in questa fase di avvio: se il primo tentativo
+  // fallisce (tipicamente per DNS non ancora pronto, il router/rete
+  // impiega qualche decina di secondi ad "assestarsi" dopo un boot
+  // fisico), ritentiamo ogni 3s per un massimo di ~90s invece di
+  // aspettare il primo ciclo intero da 10s ripetuto più volte. Questo
+  // aggancia la connessione MQTT il prima possibile appena la rete è
+  // pronta, invece di sprecare tempo morto tra un tentativo e l'altro.
+  // Una volta usciti da setup(), il ritmo normale a 10s per ciclo
+  // riprende (vedi loop()), qui serve solo a velocizzare il boot.
+  if (wifiOk && !mqttOk) {
+    const unsigned long RETRY_AVVIO_INTERVALLO_MS = 3000;
+    const unsigned long RETRY_AVVIO_TIMEOUT_MS = 90000;
+    unsigned long retryStart = millis();
+
+    Serial.println("[MQTT] Primo tentativo fallito, retry serrato in fase di avvio...");
+    while (!mqttOk && (millis() - retryStart) < RETRY_AVVIO_TIMEOUT_MS) {
+      delay(RETRY_AVVIO_INTERVALLO_MS);
+      if (WiFi.status() != WL_CONNECTED) break; // Se anche il WiFi cade,
+                                                  // meglio lasciare che
+                                                  // sia il ciclo normale
+                                                  // (con reset completo)
+                                                  // a gestire il caso.
+      mqttOk = connectMqtt();
+    }
+  }
 
   if (wifiOk && !mqttOk) {
     Serial.println("[MQTT] Broker non raggiungibile nonostante il WiFi attivo.");
