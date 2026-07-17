@@ -15,9 +15,11 @@ services:
       - TS_STATE_DIR=/var/lib/tailscale
       - TS_USERSPACE=false
       - TS_EXTRA_ARGS=--accept-dns=false --reset
+      - TS_SERVE_CONFIG=/config/serve-config.json
     volumes:
       - tailscale-state:/var/lib/tailscale
       - /dev/net/tun:/dev/net/tun
+      - ./tailscale/serve-config.json:/config/serve-config.json:ro
     cap_add:
       - NET_ADMIN
       - NET_RAW

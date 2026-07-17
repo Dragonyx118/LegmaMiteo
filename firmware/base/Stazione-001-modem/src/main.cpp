@@ -13,6 +13,7 @@
 #include <WiFiClientSecure.h>
 #include "esp_sleep.h"
 #include <Adafruit_NeoPixel.h>
+#include "esp_task_wdt.h"
 
 const int RGB_LED_PIN = 48;
 Adafruit_NeoPixel rgbLed(1, RGB_LED_PIN, NEO_GRB + NEO_KHZ800);
@@ -70,7 +71,67 @@ const int SPI_CLK  = 17;
 const int SPI_MOSI = 15;
 const int chipSelect = 18;
 
-const uint64_t CYCLE_DURATION_US = 10000000ULL;
+// --- Campionamento adattivo ---
+// In condizioni stabili si campiona ogni 60s (basso consumo, sufficiente
+// per temperatura/pressione che variano lentamente). Se si rileva un
+// calo rapido di pressione o temperatura — segnale tipico di un
+// downburst/gust front o dell'arrivo di una supercella — si passa
+// automaticamente a 10s per non perdere risoluzione temporale proprio
+// nei momenti più critici, restando in modalità veloce per un periodo
+// minimo dopo l'ultimo trigger (l'evento potrebbe continuare a
+// evolvere anche dopo il primo segnale).
+const uint64_t CICLO_STABILE_US = 60000000ULL;   // 60s
+const uint64_t CICLO_VELOCE_US  = 10000000ULL;   // 10s
+const float SOGLIA_CALO_PRESSIONE_HPA_MIN = 1.0f; // hPa/min
+const float SOGLIA_CALO_TEMPERATURA_C_MIN = 1.0f; // °C/min
+const unsigned long DURATA_MODALITA_VELOCE_MS = 15UL * 60UL * 1000UL; // 15 minuti
+
+uint64_t cicloAttualeUs = CICLO_STABILE_US;
+unsigned long modalitaVeloceFinoAMillis = 0; // 0 = modalità stabile attiva
+
+bool primaLetturaAdattiva = true;
+float precTemperaturaAdattiva = 0.0f;
+float precPressioneAdattivaHpa = 0.0f;
+unsigned long precTimestampAdattivoMs = 0;
+
+// Valuta se la lettura corrente indica un evento in rapida evoluzione,
+// confrontandola con la precedente e normalizzando per il tempo
+// realmente trascorso (che varia: 10s in modalità veloce, 60s in
+// stabile). Se supera le soglie, estende/attiva la modalità veloce.
+void valutaCampionamentoAdattivo(float temperaturaAttuale, float pressioneAttualeHpa) {
+  unsigned long oraMs = millis();
+
+  if (!primaLetturaAdattiva) {
+    float deltaMinuti = (float)(oraMs - precTimestampAdattivoMs) / 60000.0f;
+    if (deltaMinuti > 0.01f) { // Evita divisioni per intervalli troppo piccoli
+      float ratePressione = (pressioneAttualeHpa - precPressioneAdattivaHpa) / deltaMinuti;
+      float rateTemperatura = fabs(temperaturaAttuale - precTemperaturaAdattiva) / deltaMinuti;
+
+      bool caloPressioneRapido = ratePressione <= -SOGLIA_CALO_PRESSIONE_HPA_MIN;
+      bool caloTemperaturaRapido = rateTemperatura >= SOGLIA_CALO_TEMPERATURA_C_MIN;
+
+      if (caloPressioneRapido || caloTemperaturaRapido) {
+        if (modalitaVeloceFinoAMillis == 0) {
+          Serial.printf("[ADATTIVO] Evento rapido rilevato (pressione: %.2f hPa/min, temperatura: %.2f C/min) - passo a campionamento veloce (10s).\n",
+                        ratePressione, rateTemperatura);
+        }
+        modalitaVeloceFinoAMillis = oraMs + DURATA_MODALITA_VELOCE_MS;
+      }
+    }
+  }
+
+  precTemperaturaAdattiva = temperaturaAttuale;
+  precPressioneAdattivaHpa = pressioneAttualeHpa;
+  precTimestampAdattivoMs = oraMs;
+  primaLetturaAdattiva = false;
+
+  if (modalitaVeloceFinoAMillis != 0 && (long)(oraMs - modalitaVeloceFinoAMillis) >= 0) {
+    Serial.println("[ADATTIVO] Nessun evento rapido da un po', torno al campionamento stabile (60s).");
+    modalitaVeloceFinoAMillis = 0;
+  }
+
+  cicloAttualeUs = (modalitaVeloceFinoAMillis != 0) ? CICLO_VELOCE_US : CICLO_STABILE_US;
+}
 
 bool timeSynchronized = false;
 uint32_t sdReadOffset = 0;
@@ -84,6 +145,25 @@ const uint32_t SD_COMPACT_THRESHOLD_BYTES = 200000;
 // stack WiFi previene questo).
 const int MAX_RICONNESSIONI_CONSECUTIVE = 6;
 int riconnessioniConsecutiveFallite = 0;
+
+// Timeout del task watchdog: se loop() non "nutre" il watchdog per più
+// di questo tempo (es. blocco per bug imprevisto, exception, deadlock),
+// l'ESP32 si riavvia da solo — equivalente automatico del pulsante
+// reset fisico. 60s dà ampio margine anche ai cicli più lunghi (es.
+// recupero backlog aggressivo, che può arrivare a ~8-9s di lavoro attivo).
+const uint32_t WATCHDOG_TIMEOUT_SEC = 60;
+
+// Se il reset completo dello stack WiFi (già tentato dopo
+// MAX_RICONNESSIONI_CONSECUTIVE fallimenti) non risolve il problema per
+// più round consecutivi, il radio potrebbe essere rimasto in uno stato
+// "bloccato" più profondo di quanto un semplice WiFi.disconnect()+begin()
+// riesca a sistemare — osservato in campo: serviva il pulsante reset
+// fisico (riavvio completo del microcontrollore) per sbloccarlo. Questa
+// soglia forza un vero esp_restart() dopo troppi round di reset WiFi
+// falliti di fila, automatizzando quello che prima richiedeva
+// l'intervento manuale.
+const int MAX_RESET_WIFI_FALLITI_CONSECUTIVI = 3;
+int resetWifiFallitiConsecutivi = 0;
 
 WiFiClientSecure wifiClient;
 PubSubClient mqtt(wifiClient);
@@ -222,9 +302,10 @@ bool connectWifiCompleto() {
                     " (RSSI: " + String(rssi) + " dBm)");
     mostraQualitaSegnaleLed(rssi);
 
-    // WIFI_PS_MIN_MODEM: power-save minimo, compatibile col light sleep.
-    // Mantiene l'associazione all'AP mentre riduce il consumo del radio
-    // tra un beacon e l'altro.
+    // WIFI_PS_MIN_MODEM: power-save minimo del radio (il modem si
+    // "congela" tra un beacon e l'altro), compatibile con l'architettura
+    // a modem sleep: la CPU resta sempre sveglia (niente light sleep),
+    // quindi mantiene l'associazione WiFi in modo affidabile e testato.
     esp_wifi_set_ps(WIFI_PS_MIN_MODEM);
 
     trySyncTime();
@@ -297,7 +378,28 @@ bool assicuraConnessioneAttiva() {
     WiFi.disconnect(true);
     delay(100);
     bool wifiOk = connectWifiCompleto();
-    if (wifiOk) return connectMqtt();
+    bool mqttOk = wifiOk && connectMqtt();
+
+    if (mqttOk) {
+      resetWifiFallitiConsecutivi = 0;
+      return true;
+    }
+
+    resetWifiFallitiConsecutivi++;
+    riconnessioniConsecutiveFallite = 0; // Il prossimo round riparte da zero.
+
+    if (resetWifiFallitiConsecutivi >= MAX_RESET_WIFI_FALLITI_CONSECUTIVI) {
+      // Anche il reset software dello stack WiFi non ha risolto per
+      // troppi round di fila: il radio è probabilmente in uno stato
+      // bloccato che solo un riavvio completo del microcontrollore può
+      // sbloccare (osservato in campo: serviva il pulsante reset
+      // fisico). esp_restart() lo automatizza.
+      Serial.println("[SISTEMA] Reset WiFi ripetuti falliti troppe volte: riavvio completo del microcontrollore.");
+      Serial.flush();
+      delay(200);
+      esp_restart();
+    }
+
     return false;
   }
 
@@ -323,7 +425,8 @@ const unsigned long SD_FLUSH_BUDGET_AGGRESSIVO_MS = 8000;  // backlog enorme (gi
 const uint32_t SD_SOGLIA_BACKLOG_MEDIO_BYTES      = 50000;   // ~50KB
 const uint32_t SD_SOGLIA_BACKLOG_GRANDE_BYTES     = 500000;  // ~500KB
 
-const unsigned long SD_FLUSH_DELAY_MS = 50;
+const unsigned long SD_FLUSH_DELAY_NORMALE_MS = 50;
+const unsigned long SD_FLUSH_DELAY_AGGRESSIVO_MS = 8;
 const int SD_FLUSH_MAX_ROWS_PER_CYCLE_NORMALE = 10;
 
 void svuotaCodaSD() {
@@ -351,20 +454,34 @@ void svuotaCodaSD() {
   uint32_t backlogResiduo = fileSize - sdReadOffset;
   unsigned long flushBudgetMs;
   int maxRighePerCiclo;
+  unsigned long flushDelayMs;
 
   if (backlogResiduo >= SD_SOGLIA_BACKLOG_GRANDE_BYTES) {
-    // Backlog enorme: modalità recupero aggressivo, nessun limite di
-    // righe (solo il budget di tempo conta), per svuotare il più
-    // possibile in ogni ciclo finché il backlog resta sopra soglia.
-    flushBudgetMs = SD_FLUSH_BUDGET_AGGRESSIVO_MS;
+    // Backlog enorme: invece di un tetto fisso di 8s, sfruttiamo quasi
+    // tutto il tempo disponibile nel ciclo corrente. In modalità stabile
+    // (60s) questo significa recuperare molto più aggressivamente
+    // durante il tempo che altrimenti passeremmo semplicemente ad
+    // aspettare senza far nulla di utile — la stazione arriva comunque
+    // "in orario" al prossimo campione, ma nel frattempo ha smaltito
+    // molto più backlog. In modalità veloce (10s) il margine resta
+    // stretto come prima, per non ritardare troppo il prossimo
+    // campione durante un evento in corso.
+    const unsigned long SD_FLUSH_MARGINE_MS = 1500; // Tempo lasciato libero per lettura live + overhead del ciclo.
+    unsigned long budgetDisponibile = (unsigned long)(cicloAttualeUs / 1000ULL);
+    budgetDisponibile = (budgetDisponibile > SD_FLUSH_MARGINE_MS) ? (budgetDisponibile - SD_FLUSH_MARGINE_MS) : SD_FLUSH_BUDGET_AGGRESSIVO_MS;
+    flushBudgetMs = (budgetDisponibile > SD_FLUSH_BUDGET_AGGRESSIVO_MS) ? budgetDisponibile : SD_FLUSH_BUDGET_AGGRESSIVO_MS;
     maxRighePerCiclo = INT32_MAX;
-    Serial.println("[SD-RECOVERY] Backlog enorme rilevato: modalità recupero aggressivo attiva.");
+    flushDelayMs = SD_FLUSH_DELAY_AGGRESSIVO_MS;
+    Serial.printf("[SD-RECOVERY] Backlog enorme rilevato: modalità recupero aggressivo attiva (budget %lums, sfruttando il tempo del ciclo %s).\n",
+                  flushBudgetMs, (cicloAttualeUs == CICLO_VELOCE_US) ? "veloce" : "stabile");
   } else if (backlogResiduo >= SD_SOGLIA_BACKLOG_MEDIO_BYTES) {
     flushBudgetMs = SD_FLUSH_BUDGET_MEDIO_MS;
     maxRighePerCiclo = INT32_MAX;
+    flushDelayMs = SD_FLUSH_DELAY_AGGRESSIVO_MS;
   } else {
     flushBudgetMs = SD_FLUSH_BUDGET_NORMALE_MS;
     maxRighePerCiclo = SD_FLUSH_MAX_ROWS_PER_CYCLE_NORMALE;
+    flushDelayMs = SD_FLUSH_DELAY_NORMALE_MS;
   }
 
   Serial.printf("[SD-RECOVERY] Riprendo l'invio da offset %u/%u byte...\n", sdReadOffset, fileSize);
@@ -378,6 +495,7 @@ void svuotaCodaSD() {
   int righeInviate = 0;
 
   while (file.available()) {
+    esp_task_wdt_reset();
     if ((millis() - flushStart) >= flushBudgetMs) {
       break;
     }
@@ -385,18 +503,29 @@ void svuotaCodaSD() {
       break;
     }
 
-    String rigaPayload = file.readStringUntil('\n');
-    rigaPayload.trim();
+    // Buffer fisso invece di String: readStringUntil() alloca un nuovo
+    // oggetto String (heap) ad ogni riga letta. Con centinaia di righe
+    // per ciclo in modalità di recupero backlog, questo può frammentare
+    // l'heap nel tempo. Un buffer statico riutilizzato evita del tutto
+    // queste allocazioni/deallocazioni ripetute.
+    static char rigaBuf[300];
+    size_t rigaLen = file.readBytesUntil('\n', rigaBuf, sizeof(rigaBuf) - 1);
+    rigaBuf[rigaLen] = '\0';
 
-    if (rigaPayload.length() == 0) {
+    // Trim manuale di eventuali spazi/CR finali (equivalente a .trim()).
+    while (rigaLen > 0 && (rigaBuf[rigaLen - 1] == '\r' || rigaBuf[rigaLen - 1] == ' ' || rigaBuf[rigaLen - 1] == '\n')) {
+      rigaBuf[--rigaLen] = '\0';
+    }
+
+    if (rigaLen == 0) {
       sdReadOffset = file.position();
       continue;
     }
 
-    if (mqtt.connected() && mqtt.publish(topic, rigaPayload.c_str())) {
+    if (mqtt.connected() && mqtt.publish(topic, rigaBuf)) {
       righeInviate++;
       sdReadOffset = file.position();
-      delay(SD_FLUSH_DELAY_MS);
+      delay(flushDelayMs);
       continue;
     }
 
@@ -457,6 +586,8 @@ void handleDataCycle(bool mqttReady) {
   float real_temp = bmp.readTemperature();
   float real_press = bmp.readPressure() / 100.0F;
 
+  valutaCampionamentoAdattivo(real_temp, real_press);
+
   float humidity = 0.0;
   float lux      = 0.0;
   float wind     = 0.0;
@@ -499,14 +630,15 @@ void handleDataCycle(bool mqttReady) {
 // e socket "zombie"), al costo di un consumo medio più alto.
 void attesaModemSleep(unsigned long cycleStartMillis) {
   unsigned long elapsedMs = millis() - cycleStartMillis;
-  long restanteMs = (long)(CYCLE_DURATION_US / 1000ULL) - (long)elapsedMs;
+  long restanteMs = (long)(cicloAttualeUs / 1000ULL) - (long)elapsedMs;
   if (restanteMs < 0) restanteMs = 0;
 
-  Serial.printf("[WAIT] Ciclo attivo: %lums. Attesa (modem sleep) per %ldms.\n",
-                elapsedMs, restanteMs);
+  Serial.printf("[WAIT] Ciclo attivo: %lums. Attesa (modem sleep) per %ldms. [Modalità: %s]\n",
+                elapsedMs, restanteMs, (cicloAttualeUs == CICLO_VELOCE_US) ? "VELOCE 10s" : "stabile 60s");
 
   unsigned long waitStart = millis();
   while ((long)(millis() - waitStart) < restanteMs) {
+    esp_task_wdt_reset();
     if (mqtt.connected()) mqtt.loop();
     delay(20);
   }
@@ -515,6 +647,17 @@ void attesaModemSleep(unsigned long cycleStartMillis) {
 void setup() {
   Serial.begin(115200);
   delay(100);
+
+  // Task watchdog: se loop() smette di "nutrirlo" per più di
+  // WATCHDOG_TIMEOUT_SEC (bug imprevisto, exception, deadlock su I2C/SPI/
+  // rete), l'ESP32 si riavvia da solo automaticamente — equivalente
+  // software del pulsante reset fisico.
+  // API legacy del watchdog (compatibile con core Arduino-ESP32 senza
+  // la struct esp_task_wdt_config_t, introdotta solo in versioni più
+  // recenti del core/ESP-IDF): timeout in secondi + flag di panic.
+  esp_task_wdt_init(WATCHDOG_TIMEOUT_SEC, true);
+  esp_task_wdt_add(NULL); // Registra il task corrente (loop principale).
+
   Serial.println("\n--- LegmaMiteo: avvio con architettura light sleep + connessione persistente ---");
 
   rgbLed.begin();
@@ -565,6 +708,7 @@ void setup() {
 
     Serial.println("[MQTT] Primo tentativo fallito, retry serrato in fase di avvio...");
     while (!mqttOk && (millis() - retryStart) < RETRY_AVVIO_TIMEOUT_MS) {
+      esp_task_wdt_reset();
       delay(RETRY_AVVIO_INTERVALLO_MS);
       if (WiFi.status() != WL_CONNECTED) break; // Se anche il WiFi cade,
                                                   // meglio lasciare che
@@ -586,6 +730,8 @@ void setup() {
 }
 
 void loop() {
+  esp_task_wdt_reset(); // "Nutre" il watchdog: conferma che il loop non è bloccato.
+
   unsigned long cycleStart = millis();
 
   bool connesso = assicuraConnessioneAttiva();
