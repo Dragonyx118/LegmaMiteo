@@ -72,7 +72,7 @@ const int SPI_MOSI = 15;
 const int chipSelect = 18;
 
 // --- Campionamento adattivo ---
-// In condizioni stabili si campiona ogni 60s (basso consumo, sufficiente
+// In condizioni stabili si campiona ogni 30s (basso consumo, sufficiente
 // per temperatura/pressione che variano lentamente). Se si rileva un
 // calo rapido di pressione o temperatura — segnale tipico di un
 // downburst/gust front o dell'arrivo di una supercella — si passa
@@ -80,7 +80,7 @@ const int chipSelect = 18;
 // nei momenti più critici, restando in modalità veloce per un periodo
 // minimo dopo l'ultimo trigger (l'evento potrebbe continuare a
 // evolvere anche dopo il primo segnale).
-const uint64_t CICLO_STABILE_US = 60000000ULL;   // 60s
+const uint64_t CICLO_STABILE_US = 30000000ULL;   // 30s
 const uint64_t CICLO_VELOCE_US  = 10000000ULL;   // 10s
 const float SOGLIA_CALO_PRESSIONE_HPA_MIN = 1.0f; // hPa/min
 const float SOGLIA_CALO_TEMPERATURA_C_MIN = 1.0f; // °C/min
@@ -96,7 +96,7 @@ unsigned long precTimestampAdattivoMs = 0;
 
 // Valuta se la lettura corrente indica un evento in rapida evoluzione,
 // confrontandola con la precedente e normalizzando per il tempo
-// realmente trascorso (che varia: 10s in modalità veloce, 60s in
+// realmente trascorso (che varia: 10s in modalità veloce, 30s in
 // stabile). Se supera le soglie, estende/attiva la modalità veloce.
 void valutaCampionamentoAdattivo(float temperaturaAttuale, float pressioneAttualeHpa) {
   unsigned long oraMs = millis();
@@ -126,7 +126,7 @@ void valutaCampionamentoAdattivo(float temperaturaAttuale, float pressioneAttual
   primaLetturaAdattiva = false;
 
   if (modalitaVeloceFinoAMillis != 0 && (long)(oraMs - modalitaVeloceFinoAMillis) >= 0) {
-    Serial.println("[ADATTIVO] Nessun evento rapido da un po', torno al campionamento stabile (60s).");
+    Serial.println("[ADATTIVO] Nessun evento rapido da un po', torno al campionamento stabile (30s).");
     modalitaVeloceFinoAMillis = 0;
   }
 
@@ -456,24 +456,29 @@ void svuotaCodaSD() {
   int maxRighePerCiclo;
   unsigned long flushDelayMs;
 
-  if (backlogResiduo >= SD_SOGLIA_BACKLOG_GRANDE_BYTES) {
-    // Backlog enorme: invece di un tetto fisso di 8s, sfruttiamo quasi
-    // tutto il tempo disponibile nel ciclo corrente. In modalità stabile
-    // (60s) questo significa recuperare molto più aggressivamente
-    // durante il tempo che altrimenti passeremmo semplicemente ad
-    // aspettare senza far nulla di utile — la stazione arriva comunque
-    // "in orario" al prossimo campione, ma nel frattempo ha smaltito
-    // molto più backlog. In modalità veloce (10s) il margine resta
-    // stretto come prima, per non ritardare troppo il prossimo
-    // campione durante un evento in corso.
+  bool inModalitaStabile = (cicloAttualeUs == CICLO_STABILE_US);
+
+  if (inModalitaStabile && backlogResiduo > 0) {
+    // In modalità stabile (30s), qualsiasi backlog residuo — piccolo o
+    // grande — sfrutta il tempo che altrimenti passeremmo semplicemente
+    // ad aspettare senza far nulla di utile. Non ha senso limitare
+    // questo comportamento solo ai backlog enormi: anche pochi KB
+    // rimasti, se recuperati a piccoli bocconi (10 righe/ciclo), possono
+    // impiegare decine di minuti invece di uno o due cicli.
     const unsigned long SD_FLUSH_MARGINE_MS = 1500; // Tempo lasciato libero per lettura live + overhead del ciclo.
     unsigned long budgetDisponibile = (unsigned long)(cicloAttualeUs / 1000ULL);
     budgetDisponibile = (budgetDisponibile > SD_FLUSH_MARGINE_MS) ? (budgetDisponibile - SD_FLUSH_MARGINE_MS) : SD_FLUSH_BUDGET_AGGRESSIVO_MS;
     flushBudgetMs = (budgetDisponibile > SD_FLUSH_BUDGET_AGGRESSIVO_MS) ? budgetDisponibile : SD_FLUSH_BUDGET_AGGRESSIVO_MS;
     maxRighePerCiclo = INT32_MAX;
     flushDelayMs = SD_FLUSH_DELAY_AGGRESSIVO_MS;
-    Serial.printf("[SD-RECOVERY] Backlog enorme rilevato: modalità recupero aggressivo attiva (budget %lums, sfruttando il tempo del ciclo %s).\n",
-                  flushBudgetMs, (cicloAttualeUs == CICLO_VELOCE_US) ? "veloce" : "stabile");
+    Serial.printf("[SD-RECOVERY] Modalità stabile con backlog residuo: recupero esteso attivo (budget %lums).\n", flushBudgetMs);
+  } else if (backlogResiduo >= SD_SOGLIA_BACKLOG_GRANDE_BYTES) {
+    // Modalità veloce con backlog enorme: restiamo più cauti (budget
+    // fisso più corto) per non ritardare troppo il prossimo campione,
+    // importante durante un evento meteo in corso.
+    flushBudgetMs = SD_FLUSH_BUDGET_AGGRESSIVO_MS;
+    maxRighePerCiclo = INT32_MAX;
+    flushDelayMs = SD_FLUSH_DELAY_AGGRESSIVO_MS;
   } else if (backlogResiduo >= SD_SOGLIA_BACKLOG_MEDIO_BYTES) {
     flushBudgetMs = SD_FLUSH_BUDGET_MEDIO_MS;
     maxRighePerCiclo = INT32_MAX;
@@ -628,13 +633,19 @@ void handleDataCycle(bool mqttReady) {
 // mqtt.loop() regolarmente. Questo evita il problema di sincronizzazione
 // radio osservato con il light sleep esplicito (disassociazioni cicliche
 // e socket "zombie"), al costo di un consumo medio più alto.
-void attesaModemSleep(unsigned long cycleStartMillis) {
+void attesaModemSleep(unsigned long cycleStartMillis, bool connessioneRiuscita) {
+  // Stessa logica del file LightSleep: se la connessione è fallita,
+  // ritentiamo velocemente indipendentemente dalla modalità meteo.
+  uint64_t cicloEffettivoUs = connessioneRiuscita ? cicloAttualeUs : CICLO_VELOCE_US;
+
   unsigned long elapsedMs = millis() - cycleStartMillis;
-  long restanteMs = (long)(cicloAttualeUs / 1000ULL) - (long)elapsedMs;
+  long restanteMs = (long)(cicloEffettivoUs / 1000ULL) - (long)elapsedMs;
   if (restanteMs < 0) restanteMs = 0;
 
-  Serial.printf("[WAIT] Ciclo attivo: %lums. Attesa (modem sleep) per %ldms. [Modalità: %s]\n",
-                elapsedMs, restanteMs, (cicloAttualeUs == CICLO_VELOCE_US) ? "VELOCE 10s" : "stabile 60s");
+  Serial.printf("[WAIT] Ciclo attivo: %lums. Attesa (modem sleep) per %ldms. [Modalità: %s%s]\n",
+                elapsedMs, restanteMs,
+                (cicloAttualeUs == CICLO_VELOCE_US) ? "VELOCE 10s" : "stabile 30s",
+                connessioneRiuscita ? "" : " - RETRY RAPIDO per connessione fallita");
 
   unsigned long waitStart = millis();
   while ((long)(millis() - waitStart) < restanteMs) {
@@ -742,5 +753,5 @@ void loop() {
 
   if (connesso) svuotaCodaSD();
 
-  attesaModemSleep(cycleStart);
+  attesaModemSleep(cycleStart, connesso);
 }

@@ -72,7 +72,7 @@ const int SPI_MOSI = 15;
 const int chipSelect = 18;
 
 // --- Campionamento adattivo ---
-// In condizioni stabili si campiona ogni 60s (basso consumo, sufficiente
+// In condizioni stabili si campiona ogni 30s (basso consumo, sufficiente
 // per temperatura/pressione che variano lentamente). Se si rileva un
 // calo rapido di pressione o temperatura — segnale tipico di un
 // downburst/gust front o dell'arrivo di una supercella — si passa
@@ -80,13 +80,18 @@ const int chipSelect = 18;
 // nei momenti più critici, restando in modalità veloce per un periodo
 // minimo dopo l'ultimo trigger (l'evento potrebbe continuare a
 // evolvere anche dopo il primo segnale).
-const uint64_t CICLO_STABILE_US = 60000000ULL;   // 60s
+const uint64_t CICLO_STABILE_US = 30000000ULL;   // 30s
 const uint64_t CICLO_VELOCE_US  = 10000000ULL;   // 10s
 const float SOGLIA_CALO_PRESSIONE_HPA_MIN = 1.0f; // hPa/min
 const float SOGLIA_CALO_TEMPERATURA_C_MIN = 1.0f; // °C/min
 const unsigned long DURATA_MODALITA_VELOCE_MS = 15UL * 60UL * 1000UL; // 15 minuti
 
-uint64_t cicloAttualeUs = CICLO_STABILE_US;
+uint64_t cicloAttualeUs = CICLO_VELOCE_US; // Parte veloce: se la connessione
+                                             // al boot fallisce, i retry sono
+                                             // ogni 10s invece di aspettare
+                                             // fino a 60s. Passa a stabile
+                                             // dopo la prima finestra senza
+                                             // eventi rapidi rilevati.
 unsigned long modalitaVeloceFinoAMillis = 0; // 0 = modalità stabile attiva
 
 bool primaLetturaAdattiva = true;
@@ -96,7 +101,7 @@ unsigned long precTimestampAdattivoMs = 0;
 
 // Valuta se la lettura corrente indica un evento in rapida evoluzione,
 // confrontandola con la precedente e normalizzando per il tempo
-// realmente trascorso (che varia: 10s in modalità veloce, 60s in
+// realmente trascorso (che varia: 10s in modalità veloce, 30s in
 // stabile). Se supera le soglie, estende/attiva la modalità veloce.
 void valutaCampionamentoAdattivo(float temperaturaAttuale, float pressioneAttualeHpa) {
   unsigned long oraMs = millis();
@@ -126,7 +131,7 @@ void valutaCampionamentoAdattivo(float temperaturaAttuale, float pressioneAttual
   primaLetturaAdattiva = false;
 
   if (modalitaVeloceFinoAMillis != 0 && (long)(oraMs - modalitaVeloceFinoAMillis) >= 0) {
-    Serial.println("[ADATTIVO] Nessun evento rapido da un po', torno al campionamento stabile (60s).");
+    Serial.println("[ADATTIVO] Nessun evento rapido da un po', torno al campionamento stabile (30s).");
     modalitaVeloceFinoAMillis = 0;
   }
 
@@ -465,24 +470,29 @@ void svuotaCodaSD() {
   int maxRighePerCiclo;
   unsigned long flushDelayMs;
 
-  if (backlogResiduo >= SD_SOGLIA_BACKLOG_GRANDE_BYTES) {
-    // Backlog enorme: invece di un tetto fisso di 8s, sfruttiamo quasi
-    // tutto il tempo disponibile nel ciclo corrente. In modalità stabile
-    // (60s) questo significa recuperare molto più aggressivamente
-    // durante il tempo che altrimenti passeremmo semplicemente ad
-    // aspettare senza far nulla di utile — la stazione arriva comunque
-    // "in orario" al prossimo campione, ma nel frattempo ha smaltito
-    // molto più backlog. In modalità veloce (10s) il margine resta
-    // stretto come prima, per non ritardare troppo il prossimo
-    // campione durante un evento in corso.
+  bool inModalitaStabile = (cicloAttualeUs == CICLO_STABILE_US);
+
+  if (inModalitaStabile && backlogResiduo > 0) {
+    // In modalità stabile (30s), qualsiasi backlog residuo — piccolo o
+    // grande — sfrutta il tempo che altrimenti passeremmo semplicemente
+    // ad aspettare senza far nulla di utile. Non ha senso limitare
+    // questo comportamento solo ai backlog enormi: anche pochi KB
+    // rimasti, se recuperati a piccoli bocconi (10 righe/ciclo), possono
+    // impiegare decine di minuti invece di uno o due cicli.
     const unsigned long SD_FLUSH_MARGINE_MS = 1500; // Tempo lasciato libero per lettura live + overhead del ciclo.
     unsigned long budgetDisponibile = (unsigned long)(cicloAttualeUs / 1000ULL);
     budgetDisponibile = (budgetDisponibile > SD_FLUSH_MARGINE_MS) ? (budgetDisponibile - SD_FLUSH_MARGINE_MS) : SD_FLUSH_BUDGET_AGGRESSIVO_MS;
     flushBudgetMs = (budgetDisponibile > SD_FLUSH_BUDGET_AGGRESSIVO_MS) ? budgetDisponibile : SD_FLUSH_BUDGET_AGGRESSIVO_MS;
     maxRighePerCiclo = INT32_MAX;
     flushDelayMs = SD_FLUSH_DELAY_AGGRESSIVO_MS;
-    Serial.printf("[SD-RECOVERY] Backlog enorme rilevato: modalità recupero aggressivo attiva (budget %lums, sfruttando il tempo del ciclo %s).\n",
-                  flushBudgetMs, (cicloAttualeUs == CICLO_VELOCE_US) ? "veloce" : "stabile");
+    Serial.printf("[SD-RECOVERY] Modalità stabile con backlog residuo: recupero esteso attivo (budget %lums).\n", flushBudgetMs);
+  } else if (backlogResiduo >= SD_SOGLIA_BACKLOG_GRANDE_BYTES) {
+    // Modalità veloce con backlog enorme: restiamo più cauti (budget
+    // fisso più corto) per non ritardare troppo il prossimo campione,
+    // importante durante un evento meteo in corso.
+    flushBudgetMs = SD_FLUSH_BUDGET_AGGRESSIVO_MS;
+    maxRighePerCiclo = INT32_MAX;
+    flushDelayMs = SD_FLUSH_DELAY_AGGRESSIVO_MS;
   } else if (backlogResiduo >= SD_SOGLIA_BACKLOG_MEDIO_BYTES) {
     flushBudgetMs = SD_FLUSH_BUDGET_MEDIO_MS;
     maxRighePerCiclo = INT32_MAX;
@@ -647,14 +657,24 @@ void handleDataCycle(bool mqttReady) {
 // smontata pulitamente prima e ricostruita da zero al risveglio (vedi
 // loop(), che richiama connectWifiCompleto()+connectMqtt() ad ogni
 // ciclo, esattamente come se fosse un riavvio).
-void vaiInLightSleepReale(unsigned long cycleStartMillis) {
+void vaiInLightSleepReale(unsigned long cycleStartMillis, bool connessioneRiuscita) {
+  // Se la connessione è fallita in questo ciclo, ritentiamo velocemente
+  // (come in modalità veloce) INDIPENDENTEMENTE dalla modalità meteo:
+  // un problema di rete/DNS va ritentato spesso, non ha senso aspettare
+  // fino a 60s solo perché il meteo è stabile. La modalità meteo governa
+  // la cadenza di CAMPIONAMENTO quando la connessione funziona, non la
+  // cadenza di RETRY quando è caduta.
+  uint64_t cicloEffettivoUs = connessioneRiuscita ? cicloAttualeUs : CICLO_VELOCE_US;
+
   unsigned long elapsedMs = millis() - cycleStartMillis;
-  long sleepMs = (long)(cicloAttualeUs / 1000ULL) - (long)elapsedMs;
+  long sleepMs = (long)(cicloEffettivoUs / 1000ULL) - (long)elapsedMs;
   const long SLEEP_MINIMO_MS = 500;
   if (sleepMs < SLEEP_MINIMO_MS) sleepMs = SLEEP_MINIMO_MS;
 
-  Serial.printf("[SLEEP] Ciclo attivo: %lums. Light sleep reale per %ldms. [Modalità: %s]\n",
-                elapsedMs, sleepMs, (cicloAttualeUs == CICLO_VELOCE_US) ? "VELOCE 10s" : "stabile 60s");
+  Serial.printf("[SLEEP] Ciclo attivo: %lums. Light sleep reale per %ldms. [Modalità: %s%s]\n",
+                elapsedMs, sleepMs,
+                (cicloAttualeUs == CICLO_VELOCE_US) ? "VELOCE 10s" : "stabile 30s",
+                connessioneRiuscita ? "" : " - RETRY RAPIDO per connessione fallita");
 
   // Disconnessione pulita PRIMA del sonno: chiudiamo MQTT, disconnettiamo
   // il WiFi mantenendo la configurazione (SSID/password) per un
@@ -717,50 +737,20 @@ void setup() {
   mqtt.setServer(MQTT_HOST, MQTT_PORT);
   mqtt.setBufferSize(512);
   mqtt.setSocketTimeout(10);
-  // Keepalive più corto del default (15s invece di 60s): con connessione
-  // persistente conviene rilevare prima un socket morto, così il
-  // fallback su SD scatta rapidamente invece di accorgersi del problema
-  // solo al timeout lungo di default.
+  // Keepalive più corto del default (15s invece di 60s): utile a
+  // rilevare rapidamente un socket morto durante il breve periodo di
+  // attività di ogni ciclo.
   mqtt.setKeepAlive(15);
 
-  bool wifiOk = connectWifiCompleto();
-  bool mqttOk = wifiOk && connectMqtt();
-
-  // Retry serrato SOLO in questa fase di avvio: se il primo tentativo
-  // fallisce (tipicamente per DNS non ancora pronto, il router/rete
-  // impiega qualche decina di secondi ad "assestarsi" dopo un boot
-  // fisico), ritentiamo ogni 3s per un massimo di ~90s invece di
-  // aspettare il primo ciclo intero da 10s ripetuto più volte. Questo
-  // aggancia la connessione MQTT il prima possibile appena la rete è
-  // pronta, invece di sprecare tempo morto tra un tentativo e l'altro.
-  // Una volta usciti da setup(), il ritmo normale a 10s per ciclo
-  // riprende (vedi loop()), qui serve solo a velocizzare il boot.
-  if (wifiOk && !mqttOk) {
-    const unsigned long RETRY_AVVIO_INTERVALLO_MS = 3000;
-    const unsigned long RETRY_AVVIO_TIMEOUT_MS = 90000;
-    unsigned long retryStart = millis();
-
-    Serial.println("[MQTT] Primo tentativo fallito, retry serrato in fase di avvio...");
-    while (!mqttOk && (millis() - retryStart) < RETRY_AVVIO_TIMEOUT_MS) {
-      esp_task_wdt_reset();
-      delay(RETRY_AVVIO_INTERVALLO_MS);
-      if (WiFi.status() != WL_CONNECTED) break; // Se anche il WiFi cade,
-                                                  // meglio lasciare che
-                                                  // sia il ciclo normale
-                                                  // (con reset completo)
-                                                  // a gestire il caso.
-      mqttOk = connectMqtt();
-    }
-  }
-
-  if (wifiOk && !mqttOk) {
-    Serial.println("[MQTT] Broker non raggiungibile nonostante il WiFi attivo.");
-    mostraMqttNonRaggiungibile();
-  }
-
-  // Connessione stabilita una sola volta qui. Da questo punto in poi
-  // setup() non viene più rieseguito: il ciclo vive dentro loop(),
-  // alternando lettura/invio dati e light sleep, mantenendo lo stato.
+  // IMPORTANTE: con l'architettura a light sleep reale, la connessione
+  // WiFi/MQTT NON viene stabilita qui in setup(). Ogni singolo ciclo di
+  // loop() si connette da zero (vedi sopra) e si disconnette
+  // completamente prima di dormire (vedi vaiInLightSleepReale()). Se
+  // setup() si connettesse già qui, il primo giro di loop() ritenterebbe
+  // una seconda connessione sopra una sessione WiFi/TLS non ancora
+  // smontata, causando conflitti di stato (osservato in test: errori
+  // SSL anomali e blocchi). Lasciamo quindi che sia il primo loop() a
+  // occuparsene, con un WiFi/MQTT puliti fin dall'inizio.
 }
 
 void loop() {
@@ -810,5 +800,5 @@ void loop() {
 
   if (mqttOk) svuotaCodaSD();
 
-  vaiInLightSleepReale(cycleStart);
+  vaiInLightSleepReale(cycleStart, mqttOk);
 }
