@@ -30,7 +30,7 @@ Instead, please use one of these private channels:
    - Fill out the form with the details of the issue.
 
 2. **Direct Email:**
-   - Send an email to **[INSERT_YOUR_EMAIL@DOMAIN.COM]** with the subject line: `[SECURITY] Vulnerability in LegmaMiteo`.
+   - Send an email to **[dany.cerioli08@gmail.com]** with the subject line: `[SECURITY] Vulnerability in LegmaMiteo`.
 
 ### Information to Include in Your Report
 
