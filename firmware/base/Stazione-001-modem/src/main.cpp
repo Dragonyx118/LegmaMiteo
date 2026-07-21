@@ -341,6 +341,30 @@ bool connectMqtt() {
 
   Serial.print("Fallita, errore=");
   Serial.println(mqtt.state());
+
+  // Secondo tentativo con DNS esterno se quello del router fallisce.
+  // Vedi commento esteso nella versione LightSleep per il ragionamento
+  // completo: qui l'effetto è meno "auto-resettante" (la connessione
+  // persiste tra i cicli), ma essendo applicato solo come fallback su
+  // fallimento — non in modo proattivo ad ogni ciclo riuscito — il
+  // rischio resta contenuto.
+  IPAddress ipAttuale = WiFi.localIP();
+  IPAddress gatewayAttuale = WiFi.gatewayIP();
+  IPAddress subnetAttuale = WiFi.subnetMask();
+  IPAddress dnsEsternoPrimario(8, 8, 8, 8);
+  IPAddress dnsEsternoSecondario(1, 1, 1, 1);
+
+  if (WiFi.config(ipAttuale, gatewayAttuale, subnetAttuale, dnsEsternoPrimario, dnsEsternoSecondario)) {
+    Serial.print("[MQTT] Riprovo con DNS esterno...");
+    delay(200);
+    if (mqtt.connect(STATION_ID, MQTT_USER, MQTT_PASSWORD)) {
+      Serial.println("Connesso!");
+      return true;
+    }
+    Serial.print("Fallita anche con DNS esterno, errore=");
+    Serial.println(mqtt.state());
+  }
+
   return false;
 }
 

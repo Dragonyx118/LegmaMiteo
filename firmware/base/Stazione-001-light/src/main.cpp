@@ -355,6 +355,34 @@ bool connectMqtt() {
 
   Serial.print("Fallita, errore=");
   Serial.println(mqtt.state());
+
+  // Secondo tentativo nello stesso ciclo con DNS esterno (Google/
+  // Cloudflare) al posto di quello del router. Utile su router che
+  // impiegano molto tempo a rendere operativo il proprio resolver DNS
+  // dopo una nuova associazione WiFi (osservato: 20-45s sistematici).
+  // Non sostituisce nulla in modo permanente: con l'architettura a
+  // light sleep il WiFi viene smontato e ricreato da zero ad ogni
+  // ciclo, quindi questo override si "resetta" automaticamente al
+  // ciclo successivo — sicuro anche se il router blocca il DNS esterno
+  // (in quel caso questo secondo tentativo fallisce e basta, senza
+  // lasciare alcun danno persistente).
+  IPAddress ipAttuale = WiFi.localIP();
+  IPAddress gatewayAttuale = WiFi.gatewayIP();
+  IPAddress subnetAttuale = WiFi.subnetMask();
+  IPAddress dnsEsternoPrimario(8, 8, 8, 8);
+  IPAddress dnsEsternoSecondario(1, 1, 1, 1);
+
+  if (WiFi.config(ipAttuale, gatewayAttuale, subnetAttuale, dnsEsternoPrimario, dnsEsternoSecondario)) {
+    Serial.print("[MQTT] Riprovo con DNS esterno...");
+    delay(200);
+    if (mqtt.connect(STATION_ID, MQTT_USER, MQTT_PASSWORD)) {
+      Serial.println("Connesso!");
+      return true;
+    }
+    Serial.print("Fallita anche con DNS esterno, errore=");
+    Serial.println(mqtt.state());
+  }
+
   return false;
 }
 
