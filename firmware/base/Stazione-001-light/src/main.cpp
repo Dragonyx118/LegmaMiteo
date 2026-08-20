@@ -323,7 +323,16 @@ bool connectWifiCompleto() {
     esp_wifi_set_ps(WIFI_PS_MIN_MODEM);
 
     trySyncTime();
-    riconnessioniConsecutiveFallite = 0;
+    // NOTA: qui NON azzeriamo riconnessioniConsecutiveFallite. Il WiFi
+    // può connettersi correttamente anche quando poi MQTT/DNS falliscono
+    // subito dopo (è esattamente il caso osservato in campo: WiFi
+    // sempre riuscito, ma risoluzione DNS bloccata per decine di minuti
+    // finché non si è reso necessario un riavvio fisico). Se azzerassimo
+    // qui, il contatore non arriverebbe mai alla soglia che fa scattare
+    // l'auto-riavvio (esp_restart() in loop()), perché verrebbe sempre
+    // resettato prima di poter accumulare i fallimenti MQTT. Il reset
+    // corretto avviene solo in loop() quando l'intero ciclo (WiFi+MQTT)
+    // riesce.
     return true;
   }
 
@@ -606,6 +615,9 @@ void svuotaCodaSD() {
     static uint8_t buf[4096];
     int n;
     while ((n = src.read(buf, sizeof(buf))) > 0) {
+      esp_task_wdt_reset(); // Con file molto grandi (decine di MB) la
+                             // copia può richiedere più del timeout del
+                             // watchdog se non lo nutriamo qui dentro.
       dst.write(buf, n);
     }
     src.close();
@@ -820,6 +832,7 @@ void loop() {
     }
   } else if (mqttOk) {
     resetWifiFallitiConsecutivi = 0;
+    riconnessioniConsecutiveFallite = 0; // Reset corretto: solo su successo COMPLETO del ciclo.
   }
 
   if (mqtt.connected()) mqtt.loop();

@@ -309,7 +309,11 @@ bool connectWifiCompleto() {
     esp_wifi_set_ps(WIFI_PS_MIN_MODEM);
 
     trySyncTime();
-    riconnessioniConsecutiveFallite = 0;
+    // NOTA: qui NON azzeriamo riconnessioniConsecutiveFallite (vedi
+    // spiegazione estesa nella versione LightSleep). Il WiFi può
+    // connettersi correttamente anche quando MQTT/DNS falliscono
+    // ripetutamente subito dopo — azzerare qui impedirebbe al contatore
+    // di raggiungere mai la soglia di auto-riavvio.
     return true;
   }
 
@@ -588,6 +592,9 @@ void svuotaCodaSD() {
     static uint8_t buf[4096];
     int n;
     while ((n = src.read(buf, sizeof(buf))) > 0) {
+      esp_task_wdt_reset(); // Con file molto grandi (decine di MB) la
+                             // copia può richiedere più del timeout del
+                             // watchdog se non lo nutriamo qui dentro.
       dst.write(buf, n);
     }
     src.close();
