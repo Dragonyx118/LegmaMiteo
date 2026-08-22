@@ -54,7 +54,7 @@ Real-time and historical data from `station-001`, visualized in Grafana:
 ## ✨ Features
 
 - **Modular design** — base unit + swappable expansion modules
-- **Dual connectivity** — WiFi (primary) + LoRa mesh (remote areas)
+- **Dual connectivity** — WiFi (primary) + LoRa mesh (Phase 2, remote areas)
 - **Solar powered** — fully autonomous, no grid required
 - **Self-hosted** — your data stays on your server
 - **Open data** — all measurements publicly accessible via REST API
@@ -66,15 +66,21 @@ Real-time and historical data from `station-001`, visualized in Grafana:
 
 | Module | Sensors | Use Case | Status |
 |--------|---------|----------|--------|
-| **BASE** | BME280, VEML7700, Rain detector, Anemometer, Rain gauge | Everywhere | ✅ Deployed (station-001) |
-| **MOD-AIR** | PMS5003, SCD40, ENS160+AHT21 | Urban / Industrial | 🚧 Dashboard ready, firmware WIP |
-| **MOD-STORM** | AS3935, BMP580, GY-91, MLX90614BAA, TSL2591 | Storm monitoring | 🚧 Dashboard ready, firmware WIP |
+| **BASE** | SHT45, MCP9808, BMP580, VEML7700, MLX90614ESF, Rain gauge, Anemometer + wind vane | Everywhere | ✅ Deployed (station-001) |
+| **MOD-AIR** | PMS5003/PMS7003, SCD41 | Urban / Industrial | 🚧 Dashboard ready, firmware WIP |
+| **MOD-STORM** | AS3935 | Storm monitoring | 🚧 Dashboard ready, firmware WIP |
 | **MOD-HYDRO** | Ultrasonic level, flow sensor, turbidity | Rivers / Flood zones | 📋 Planned |
 | **MOD-SOIL** | Capacitive moisture x3, DS18B20 | Agriculture / Forest | 📋 Planned |
 | **MOD-SNOW** | VL53L1X, load cell, DS18B20, OV2640 | Mountain / Alpine | 📋 Planned |
 | **MOD-FIRE** | Flame IR, MQ-7, MQ-2 | Mediterranean / Forest | 📋 Planned |
 | **MOD-NOISE** | MEMS microphone SPH0645 | Urban / Industrial | 💡 Concept |
 | **MOD-RAD** | ML8511 UV, Geiger tube | High altitude | 💡 Concept |
+
+> **BASE sensor notes**: SHT45 provides high-precision humidity (±1.0% RH) plus a secondary temperature channel (±0.1°C) for cross-check; MCP9808 (±0.25°C) is the primary dedicated temperature sensor. BMP580 (±0.06 hPa) handles pressure. MLX90614ESF is sky-pointing IR temperature, used as a cloud-cover proxy. A true pyranometer (RS485 solar radiation module or Apogee SP-110/SP-212) is evaluated as a future addition — VEML7700 only covers visible-light irradiance. BME280 units seen in early photos are leftover stock, not part of the final BOM.
+>
+> **MOD-STORM note**: hail is *not* detected via a dedicated piezo sensor — rejected due to false positives from birds, snow, and debris impacts. It's inferred server-side from pressure tendency + humidity + lightning activity + wind gust data instead.
+>
+> **MOD-AIR note**: SCD41 chosen over SCD40 specifically for single-shot measurement mode, compatible with the deep sleep power architecture.
 
 ---
 
@@ -85,7 +91,7 @@ Real-time and historical data from `station-001`, visualized in Grafana:
       │
       ├── WiFi ──────────────────────▶ [MQTT Broker]
       │                                      │
-      └── LoRa ──▶ [RPi LoRa Gateway] ───────┘
+      └── LoRa (Phase 2) ──▶ [RPi ChirpStack Gateway] ──┘
                                              │
                                        [Telegraf]
                                              │
@@ -112,25 +118,42 @@ waterproof SP13 IP68 8-pin connector with the following pinout:
 | 7 | UART RX |
 | 8 | GPIO / Interrupt |
 
+### Physical layout (mast, top to bottom)
+
+```
+Anemometer (top, max wind exposure, no obstructions above)
+   │
+Sensor head (MLX90614ESF + VEML7700, unobstructed zenith view)
+   │
+Radiation shield (SHT45 + MCP9808, naturally ventilated, shaded)
+   │
+Rain gauge (leveled horizontal, clear of overhead obstructions)
+   │
+Solar panel (60–70° tilt, south-facing, unshaded)
+   │
+Main enclosure (electronics + battery, accessible for maintenance)
+```
+
 ---
 
 ## 🛠️ Hardware Stack
 
-- **MCU**: ESP32-S3
-- **Connectivity**: WiFi 802.11 b/g/n + LoRa 868MHz (CDEBYTE E22-900M22S)
-- **Power**: 10W solar panel + LiFePO4 battery + MPPT controller
-- **Enclosure**: IP66 box + 3D printed Stevenson screen
+- **MCU**: ESP32-S3-DevKitC-1 (ESP32-S3-WROOM-1-N16R8, 16MB flash / 8MB PSRAM)
+- **Connectivity**: WiFi 802.11 b/g/n (active) + LoRa 868MHz via external SX1262/SX1276 module (Phase 2, planned)
+- **Power**: 30W solar panel (60–70° tilt) + LiFePO4 battery (EVE LF32/LF40 or IFR32700) + MPPT charge controller (CN3791, LiFePO4-modified for 3.65V float)
+- **Enclosure**: IP65/IP67 waterproof junction box + multi-plate radiation shield (temperature/humidity sensors)
 - **Module connector**: SP13 IP68 8-pin (JST-XH 8-pin internal)
 
 ---
 
 ## 💻 Server Stack
 
-- **MQTT Broker**: Mosquitto (with password authentication)
-- **Time-series DB**: InfluxDB 2.x
+- **MQTT Broker**: Mosquitto (TLS via Let's Encrypt, password authentication)
+- **Time-series DB**: InfluxDB 2.7 (org `legmamiteo`, bucket `stations`, separate `forecast` bucket for NWP ingestion)
 - **Visualization**: Grafana
 - **Bridge**: Telegraf
 - **REST API**: FastAPI (Python)
+- **Remote access**: Tailscale Funnel
 - **All containerized**: Docker Compose
 
 ---
@@ -139,7 +162,7 @@ waterproof SP13 IP68 8-pin connector with the following pinout:
 
 The public REST API exposes real-time and historical data from all stations.
 
-**Base URL**: `http://localhost:8000` (or your Cloudflare tunnel URL)
+**Base URL**: `http://localhost:8000` (or your Tailscale Funnel URL)
 
 | Endpoint | Description |
 |----------|-------------|
