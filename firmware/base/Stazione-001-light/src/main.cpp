@@ -141,7 +141,20 @@ void valutaCampionamentoAdattivo(float temperaturaAttuale, float pressioneAttual
 bool timeSynchronized = false;
 uint32_t sdReadOffset = 0;
 
-const uint32_t SD_COMPACT_THRESHOLD_BYTES = 200000;
+// Soglia di compattazione: quando l'offset consumato (dati già inviati,
+// diventati "spazzatura" in testa al file) supera questa soglia, il
+// file viene fisicamente riscritto per liberare spazio. ATTENZIONE:
+// questa operazione riscrive tutto il file DA QUESTO PUNTO IN POI fino
+// alla fine — con backlog molto grandi (es. dopo ore/giorni offline),
+// una soglia troppo bassa fa scattare la compattazione decine di volte,
+// ognuna delle quali ricopia quasi l'intero backlog residuo (anche
+// diversi MB) solo per liberare poche centinaia di KB di spazio già
+// inviato. 5MB è un compromesso: compatta abbastanza spesso da non far
+// crescere il file all'infinito, ma abbastanza raramente da non
+// diventare il collo di bottiglia dominante durante un recupero di
+// backlog enorme (osservato: con soglia 200KB, un backlog da 19MB
+// impiegava oltre 3 minuti per singolo ciclo di compattazione).
+const uint32_t SD_COMPACT_THRESHOLD_BYTES = 5000000;
 
 // Numero massimo di cicli consecutivi in cui il socket MQTT/WiFi risulta
 // caduto prima di forzare una disconnessione WiFi completa e ripartire
