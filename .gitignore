@@ -78,4 +78,5 @@ server/mosquitto/data/*
 server/mosquitto/log/*
 server/telegraf/telegraf.conf
 server/mosquitto/config/passwd
-**/secrets.h
+server/secrets.h
+server/telegram-bot/.env

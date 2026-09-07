@@ -83,7 +83,22 @@ services:
     restart: unless-stopped
     networks:
       - legmamiteo-network
-
+  # --- Telegram Notification Bot ---
+  telegram-bot:
+    build:
+      context: ./telegram-bot
+      dockerfile: Dockerfile
+    container_name: legmamiteo-telegram-bot
+    env_file:
+      - ./telegram-bot/.env
+    environment:
+      - INFLUX_URL=http://influxdb:8086
+    depends_on:
+      - influxdb
+    restart: unless-stopped
+    networks:
+      - legmamiteo-network
+      
   # --- REST API Backend ---
   api:
     build:
@@ -108,3 +123,4 @@ networks:
 volumes:
   grafana-data:
   tailscale-state:
+
