@@ -80,3 +80,9 @@ server/telegraf/telegraf.conf
 server/mosquitto/config/passwd
 server/secrets.h
 server/telegram-bot/.env
+firmware/base/Stazione-001-modem/src/secrets.h
+firmware/base/Stazione-001-light/src/secrets.h
+firmware/base/Stazione-001/src/secrets.h
+
+**/secrets.h
+/server/influxdb-backup-*/

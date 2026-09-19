@@ -47,7 +47,7 @@ def get_recent_data(minutes: int):
       |> range(start: -{minutes}m)
       |> filter(fn: (r) => r._measurement == "weather_station")
       |> filter(fn: (r) => r._field == "pressure" or r._field == "temperature")
-      |> filter(fn: (r) => r.station_id == "{STATION_ID}")
+      |> filter(fn: (r) => r.topic == "station/{STATION_ID}/base")
       |> aggregateWindow(every: 5m, fn: mean, createEmpty: false)
       |> sort(columns: ["_time"])
     '''
