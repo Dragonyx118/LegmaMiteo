@@ -1,7 +1,7 @@
 import os
 import time
 import requests
-from datetime import datetime
+from datetime import datetime, time as dtime
 from influxdb_client import InfluxDBClient
 
 # --- Configurazione da variabili d'ambiente ---
@@ -64,6 +64,98 @@ def get_recent_data(minutes: int):
     return pressure_vals, temp_vals
 
 
+def get_pressure_delta(hours: int = 3):
+    """Ritorna il delta di pressione nelle ultime N ore (None se dati insufficienti)."""
+    pressure_vals, _ = get_recent_data(hours * 60)
+    if len(pressure_vals) < 2:
+        return None
+    return pressure_vals[-1] - pressure_vals[0]
+
+
+def get_lux_condition(minutes: int = 15):
+    """Legge il valore lux più recente e lo classifica. Solo di giorno (7:00-20:00)."""
+    now_time = datetime.now().time()
+    if not (dtime(7, 0) <= now_time <= dtime(20, 0)):
+        return None  # di notte il lux non è indicativo del cielo
+
+    query = f'''
+    from(bucket: "{BUCKET}")
+      |> range(start: -{minutes}m)
+      |> filter(fn: (r) => r._measurement == "weather_station")
+      |> filter(fn: (r) => r._field == "lux")
+      |> filter(fn: (r) => r.topic == "station/{STATION_ID}/base")
+      |> sort(columns: ["_time"], desc: true)
+      |> limit(n: 1)
+    '''
+    tables = query_api.query(query)
+    for table in tables:
+        for record in table.records:
+            lux = record.get_value()
+            # Soglie indicative — da tarare sul sensore reale una volta raccolti dati
+            if lux < 50:
+                return "🌙 Molto scuro (cielo coperto o crepuscolo)"
+            elif lux < 1000:
+                return "☁️ Cielo nuvoloso"
+            elif lux < 10000:
+                return "⛅ Parzialmente nuvoloso"
+            elif lux < 30000:
+                return "🌤️ Soleggiato velato"
+            else:
+                return "☀️ Pieno sole"
+    return None
+
+
+def get_forecast_text(pressure_now: float, pressure_delta_3h) -> str:
+    """
+    Previsione semplificata stile barometro analogico (pressione assoluta + trend).
+    pressure_delta_3h può essere None se non ci sono abbastanza dati storici.
+    """
+    delta = pressure_delta_3h if pressure_delta_3h is not None else 0.0
+
+    # Classificazione del trend
+    if delta >= 1.6:
+        trend, trend_icon = "in rapida salita", "⬆️"
+    elif delta >= 0.5:
+        trend, trend_icon = "in salita", "↗️"
+    elif delta <= -1.6:
+        trend, trend_icon = "in rapido calo", "⬇️"
+    elif delta <= -0.5:
+        trend, trend_icon = "in calo", "↘️"
+    else:
+        trend, trend_icon = "stabile", "➡️"
+
+    # Classificazione livello assoluto + previsione testuale
+    if pressure_now >= 1022:
+        if delta >= 0.5:
+            forecast = "☀️ Bel tempo, cielo sereno in consolidamento"
+        elif delta <= -0.5:
+            forecast = "🌤️ Bel tempo ma in graduale peggioramento"
+        else:
+            forecast = "☀️ Bel tempo stabile"
+    elif pressure_now >= 1013:
+        if delta >= 0.5:
+            forecast = "⛅ Tempo in miglioramento, variabile"
+        elif delta <= -0.5:
+            forecast = "🌥️ Tempo variabile, possibile peggioramento"
+        else:
+            forecast = "⛅ Tempo variabile stabile"
+    elif pressure_now >= 1000:
+        if delta >= 0.5:
+            forecast = "🌥️ Instabile ma in miglioramento"
+        elif delta <= -1.0:
+            forecast = "🌧️ Instabile, possibili rovesci in arrivo"
+        else:
+            forecast = "☁️ Nuvoloso, tempo incerto"
+    else:
+        if delta <= -0.5:
+            forecast = "⛈️ Perturbato, condizioni in peggioramento"
+        else:
+            forecast = "🌧️ Perturbato, piogge probabili"
+
+    delta_text = f"{delta:+.1f} hPa/3h" if pressure_delta_3h is not None else "dati insufficienti"
+    return f"{forecast}\nTrend: {trend_icon} {trend} ({delta_text})"
+
+
 def check_emergency():
     global last_alert_time
 
@@ -107,12 +199,22 @@ def send_periodic_report():
         )
         return
 
-    send_telegram(
+    pressure_delta_3h = get_pressure_delta(3)
+    forecast_text = get_forecast_text(pressure_vals[-1], pressure_delta_3h)
+    lux_condition = get_lux_condition()
+
+    message = (
         f"📊 <b>Bollettino {STATION_ID}</b>\n"
         f"🕐 {datetime.now().strftime('%H:%M')}\n"
         f"🌡️ Temp: {temp_vals[-1]:.1f}°C\n"
-        f"📈 Pressione: {pressure_vals[-1]:.1f} hPa"
+        f"📈 Pressione: {pressure_vals[-1]:.1f} hPa\n\n"
+        f"<b>Previsione:</b>\n{forecast_text}"
     )
+
+    if lux_condition:
+        message += f"\n\n<b>Cielo attuale:</b> {lux_condition}"
+
+    send_telegram(message)
 
 
 def main():
