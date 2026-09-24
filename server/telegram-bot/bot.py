@@ -12,6 +12,7 @@ INFLUX_TOKEN = os.environ["INFLUX_TOKEN"]
 INFLUX_ORG = os.environ.get("INFLUX_ORG", "legmamiteo")
 BUCKET = os.environ.get("INFLUX_BUCKET", "stations")
 STATION_ID = os.environ.get("STATION_ID", "station-001")
+STATION_ALTITUDE_M = float(os.environ.get("STATION_ALTITUDE_M", 84))  # Campagnola Cremasca (CR)
 
 # --- Soglie di allerta (regolabili via env, con default sensati) ---
 PRESSURE_DROP_THRESHOLD = float(os.environ.get("PRESSURE_DROP_THRESHOLD", 1.0))   # hPa in 30 min
@@ -64,12 +65,97 @@ def get_recent_data(minutes: int):
     return pressure_vals, temp_vals
 
 
-def get_pressure_delta(hours: int = 3):
+def get_pressure_delta(hours: float):
     """Ritorna il delta di pressione nelle ultime N ore (None se dati insufficienti)."""
-    pressure_vals, _ = get_recent_data(hours * 60)
+    pressure_vals, _ = get_recent_data(int(hours * 60))
     if len(pressure_vals) < 2:
         return None
     return pressure_vals[-1] - pressure_vals[0]
+
+
+def get_multi_window_trend():
+    """Ritorna i delta di pressione su più finestre temporali: 1h, 3h, 6h."""
+    return {
+        "1h": get_pressure_delta(1),
+        "3h": get_pressure_delta(3),
+        "6h": get_pressure_delta(6),
+    }
+
+
+def get_pressure_acceleration():
+    """
+    Confronta il trend dell'ultima ora con quello delle 2 ore precedenti,
+    per capire se il calo/salita si sta intensificando o attenuando.
+    Valore negativo forte = il calo sta accelerando (peggioramento rapido).
+    """
+    delta_1h = get_pressure_delta(1)
+    delta_3h = get_pressure_delta(3)
+    if delta_1h is None or delta_3h is None:
+        return None
+    delta_prior_2h = delta_3h - delta_1h
+    return delta_1h - (delta_prior_2h / 2)
+
+
+def get_pressure_delta_24h_same_hour():
+    """
+    Confronta la pressione attuale con quella di 24h fa alla stessa ora circa,
+    per eliminare l'effetto del ciclo semidiurno naturale di pressione.
+    """
+    query = f'''
+    from(bucket: "{BUCKET}")
+      |> range(start: -25h, stop: -23h)
+      |> filter(fn: (r) => r._measurement == "weather_station")
+      |> filter(fn: (r) => r._field == "pressure")
+      |> filter(fn: (r) => r.topic == "station/{STATION_ID}/base")
+      |> mean()
+    '''
+    tables = query_api.query(query)
+    pressure_24h_ago = None
+    for table in tables:
+        for record in table.records:
+            pressure_24h_ago = record.get_value()
+
+    if pressure_24h_ago is None:
+        return None
+
+    pressure_vals, _ = get_recent_data(10)
+    if not pressure_vals:
+        return None
+
+    return pressure_vals[-1] - pressure_24h_ago
+
+
+def get_temp_range_24h():
+    """Escursione termica nelle ultime 24h — bassa escursione suggerisce cielo coperto/nebbia."""
+    _, temp_vals = get_recent_data(24 * 60)
+    if not temp_vals:
+        return None
+    return max(temp_vals) - min(temp_vals)
+
+
+def sea_level_pressure(station_pressure_hpa: float, altitude_m: float, temp_c: float) -> float:
+    """Corregge la pressione stazione al livello del mare (formula barometrica standard)."""
+    return station_pressure_hpa * (1 - (0.0065 * altitude_m) / (temp_c + 0.0065 * altitude_m + 273.15)) ** -5.257
+
+
+def get_season():
+    month = datetime.now().month
+    if month in (12, 1, 2):
+        return "inverno"
+    elif month in (3, 4, 5):
+        return "primavera"
+    elif month in (6, 7, 8):
+        return "estate"
+    else:
+        return "autunno"
+
+
+SEASONAL_THRESHOLDS = {
+    "inverno":   {"alta": 1025, "media": 1015, "bassa": 1000},
+    "primavera": {"alta": 1023, "media": 1014, "bassa": 1000},
+    "estate":    {"alta": 1020, "media": 1012, "bassa": 1003},
+    "autunno":   {"alta": 1023, "media": 1014, "bassa": 1000},
+}
 
 
 def get_lux_condition(minutes: int = 15):
@@ -105,55 +191,85 @@ def get_lux_condition(minutes: int = 15):
     return None
 
 
-def get_forecast_text(pressure_now: float, pressure_delta_3h) -> str:
+def get_forecast_text(pressure_station: float, temp_now: float) -> str:
     """
-    Previsione semplificata stile barometro analogico (pressione assoluta + trend).
-    pressure_delta_3h può essere None se non ci sono abbastanza dati storici.
+    Previsione basata su pressione corretta al livello del mare, soglie stagionali,
+    trend multi-finestra, accelerazione e confronto 24h a parità di ora.
     """
-    delta = pressure_delta_3h if pressure_delta_3h is not None else 0.0
+    pressure_slp = sea_level_pressure(pressure_station, STATION_ALTITUDE_M, temp_now)
+    season = get_season()
+    t = SEASONAL_THRESHOLDS[season]
 
-    # Classificazione del trend
-    if delta >= 1.6:
+    trends = get_multi_window_trend()
+    delta_3h = trends["3h"] if trends["3h"] is not None else 0.0
+    delta_24h_same_hour = get_pressure_delta_24h_same_hour()
+    acceleration = get_pressure_acceleration()
+    temp_range = get_temp_range_24h()
+
+    # --- Trend principale (3h) ---
+    if delta_3h >= 1.6:
         trend, trend_icon = "in rapida salita", "⬆️"
-    elif delta >= 0.5:
+    elif delta_3h >= 0.5:
         trend, trend_icon = "in salita", "↗️"
-    elif delta <= -1.6:
+    elif delta_3h <= -1.6:
         trend, trend_icon = "in rapido calo", "⬇️"
-    elif delta <= -0.5:
+    elif delta_3h <= -0.5:
         trend, trend_icon = "in calo", "↘️"
     else:
         trend, trend_icon = "stabile", "➡️"
 
-    # Classificazione livello assoluto + previsione testuale
-    if pressure_now >= 1022:
-        if delta >= 0.5:
+    # --- Previsione base su soglie stagionali ---
+    if pressure_slp >= t["alta"]:
+        if temp_range is not None and temp_range < 4 and season in ("inverno", "autunno") and delta_3h >= -0.5:
+            forecast = "🌫️ Alta pressione stabile — possibile nebbia/foschia in pianura"
+        elif delta_3h >= 0.5:
             forecast = "☀️ Bel tempo, cielo sereno in consolidamento"
-        elif delta <= -0.5:
+        elif delta_3h <= -0.5:
             forecast = "🌤️ Bel tempo ma in graduale peggioramento"
         else:
             forecast = "☀️ Bel tempo stabile"
-    elif pressure_now >= 1013:
-        if delta >= 0.5:
+    elif pressure_slp >= t["media"]:
+        if delta_3h >= 0.5:
             forecast = "⛅ Tempo in miglioramento, variabile"
-        elif delta <= -0.5:
+        elif delta_3h <= -0.5:
             forecast = "🌥️ Tempo variabile, possibile peggioramento"
         else:
             forecast = "⛅ Tempo variabile stabile"
-    elif pressure_now >= 1000:
-        if delta >= 0.5:
+    elif pressure_slp >= t["bassa"]:
+        if delta_3h >= 0.5:
             forecast = "🌥️ Instabile ma in miglioramento"
-        elif delta <= -1.0:
+        elif delta_3h <= -1.0:
             forecast = "🌧️ Instabile, possibili rovesci in arrivo"
         else:
             forecast = "☁️ Nuvoloso, tempo incerto"
     else:
-        if delta <= -0.5:
+        if delta_3h <= -0.5:
             forecast = "⛈️ Perturbato, condizioni in peggioramento"
         else:
             forecast = "🌧️ Perturbato, piogge probabili"
 
-    delta_text = f"{delta:+.1f} hPa/3h" if pressure_delta_3h is not None else "dati insufficienti"
-    return f"{forecast}\nTrend: {trend_icon} {trend} ({delta_text})"
+    # --- Nota di accelerazione, se significativa ---
+    accel_note = ""
+    if acceleration is not None and acceleration <= -0.5:
+        accel_note = "\n⚠️ Il calo di pressione si sta intensificando"
+    elif acceleration is not None and acceleration >= 0.5:
+        accel_note = "\n✅ Il trend di miglioramento si sta rafforzando"
+
+    # --- Riepilogo trend multi-finestra ---
+    def fmt(v):
+        return f"{v:+.1f}" if v is not None else "n/d"
+
+    trend_summary = (
+        f"1h: {fmt(trends['1h'])} · 3h: {fmt(trends['3h'])} · "
+        f"6h: {fmt(trends['6h'])} · 24h: {fmt(delta_24h_same_hour)} hPa"
+    )
+
+    return (
+        f"{forecast}\n"
+        f"Trend: {trend_icon} {trend}{accel_note}\n"
+        f"<i>{trend_summary}</i>\n"
+        f"<i>Pressione slm: {pressure_slp:.1f} hPa (stagione: {season})</i>"
+    )
 
 
 def check_emergency():
@@ -170,13 +286,35 @@ def check_emergency():
 
     pressure_delta = pressure_vals[-1] - pressure_vals[0]
     temp_delta = (temp_vals[-1] - temp_vals[0]) if len(temp_vals) >= 2 else 0
+    acceleration = get_pressure_acceleration()
 
-    if pressure_delta <= -PRESSURE_DROP_THRESHOLD:
+    # Allerta standard sulla soglia assoluta di calo in 30 min
+    triggered = pressure_delta <= -PRESSURE_DROP_THRESHOLD
+
+    # Allerta anticipata se il calo sta accelerando fortemente, anche sotto soglia
+    early_warning = (
+        not triggered
+        and acceleration is not None
+        and acceleration <= -0.8
+        and pressure_delta <= -0.5
+    )
+
+    if triggered:
         send_telegram(
             f"⚠️ <b>ALLERTA TEMPORALE - {STATION_ID}</b>\n"
             f"Pressione in calo: {pressure_delta:.2f} hPa in ~30 min\n"
             f"Attuale: {pressure_vals[-1]:.1f} hPa\n"
             f"Possibile peggioramento in arrivo."
+        )
+        last_alert_time = now
+        return
+
+    if early_warning:
+        send_telegram(
+            f"🟡 <b>PREALLERTA - {STATION_ID}</b>\n"
+            f"Il calo di pressione si sta intensificando\n"
+            f"Attuale: {pressure_vals[-1]:.1f} hPa ({pressure_delta:+.2f} hPa/30min)\n"
+            f"Monitorare l'evoluzione nelle prossime ore."
         )
         last_alert_time = now
         return
@@ -199,8 +337,7 @@ def send_periodic_report():
         )
         return
 
-    pressure_delta_3h = get_pressure_delta(3)
-    forecast_text = get_forecast_text(pressure_vals[-1], pressure_delta_3h)
+    forecast_text = get_forecast_text(pressure_vals[-1], temp_vals[-1])
     lux_condition = get_lux_condition()
 
     message = (
