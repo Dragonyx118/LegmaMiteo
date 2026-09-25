@@ -1,8 +1,10 @@
 import os
+import re
 import time
 import requests
 from datetime import datetime, time as dtime
 from influxdb_client import InfluxDBClient
+import xml.etree.ElementTree as ET
 
 # --- Configurazione da variabili d'ambiente ---
 BOT_TOKEN = os.environ["TELEGRAM_BOT_TOKEN"]
@@ -20,6 +22,11 @@ TEMP_DROP_THRESHOLD = float(os.environ.get("TEMP_DROP_THRESHOLD", 3.0))         
 ALERT_COOLDOWN_S = int(os.environ.get("ALERT_COOLDOWN_S", 3600))                  # 1 ora
 REPORT_INTERVAL_S = int(os.environ.get("REPORT_INTERVAL_S", 1800))                # 30 min
 CHECK_INTERVAL_S = int(os.environ.get("CHECK_INTERVAL_S", 120))                   # ogni 2 min
+
+# --- Fonti allerte ufficiali ---
+METEOALARM_URL = "https://feeds.meteoalarm.org/feeds/meteoalarm-legacy-atom-italy"
+DPC_REPO_API = "https://api.github.com/repos/pcm-dpc/DPC-Bollettini-Criticita-Idrogeologica-Idraulica/git/trees/master?recursive=1"
+DPC_RAW_BASE = "https://raw.githubusercontent.com/pcm-dpc/DPC-Bollettini-Criticita-Idrogeologica-Idraulica/master"
 
 client = InfluxDBClient(url=INFLUX_URL, token=INFLUX_TOKEN, org=INFLUX_ORG)
 query_api = client.query_api()
@@ -40,6 +47,10 @@ def send_telegram(text: str):
     except Exception as e:
         print(f"[ERRORE] Invio Telegram fallito: {e}")
 
+
+# =====================================================================
+# DATI STAZIONE (InfluxDB)
+# =====================================================================
 
 def get_recent_data(minutes: int):
     """Ritorna liste ordinate (crescente nel tempo) di valori pressione e temperatura."""
@@ -133,31 +144,6 @@ def get_temp_range_24h():
     return max(temp_vals) - min(temp_vals)
 
 
-def sea_level_pressure(station_pressure_hpa: float, altitude_m: float, temp_c: float) -> float:
-    """Corregge la pressione stazione al livello del mare (formula barometrica standard)."""
-    return station_pressure_hpa * (1 - (0.0065 * altitude_m) / (temp_c + 0.0065 * altitude_m + 273.15)) ** -5.257
-
-
-def get_season():
-    month = datetime.now().month
-    if month in (12, 1, 2):
-        return "inverno"
-    elif month in (3, 4, 5):
-        return "primavera"
-    elif month in (6, 7, 8):
-        return "estate"
-    else:
-        return "autunno"
-
-
-SEASONAL_THRESHOLDS = {
-    "inverno":   {"alta": 1025, "media": 1015, "bassa": 1000},
-    "primavera": {"alta": 1023, "media": 1014, "bassa": 1000},
-    "estate":    {"alta": 1020, "media": 1012, "bassa": 1003},
-    "autunno":   {"alta": 1023, "media": 1014, "bassa": 1000},
-}
-
-
 def get_lux_condition(minutes: int = 15):
     """Legge il valore lux più recente e lo classifica. Solo di giorno (7:00-20:00)."""
     now_time = datetime.now().time()
@@ -191,6 +177,35 @@ def get_lux_condition(minutes: int = 15):
     return None
 
 
+# =====================================================================
+# PREVISIONE BAROMETRICA
+# =====================================================================
+
+def sea_level_pressure(station_pressure_hpa: float, altitude_m: float, temp_c: float) -> float:
+    """Corregge la pressione stazione al livello del mare (formula barometrica standard)."""
+    return station_pressure_hpa * (1 - (0.0065 * altitude_m) / (temp_c + 0.0065 * altitude_m + 273.15)) ** -5.257
+
+
+def get_season():
+    month = datetime.now().month
+    if month in (12, 1, 2):
+        return "inverno"
+    elif month in (3, 4, 5):
+        return "primavera"
+    elif month in (6, 7, 8):
+        return "estate"
+    else:
+        return "autunno"
+
+
+SEASONAL_THRESHOLDS = {
+    "inverno":   {"alta": 1025, "media": 1015, "bassa": 1000},
+    "primavera": {"alta": 1023, "media": 1014, "bassa": 1000},
+    "estate":    {"alta": 1020, "media": 1012, "bassa": 1003},
+    "autunno":   {"alta": 1023, "media": 1014, "bassa": 1000},
+}
+
+
 def get_forecast_text(pressure_station: float, temp_now: float) -> str:
     """
     Previsione basata su pressione corretta al livello del mare, soglie stagionali,
@@ -206,7 +221,6 @@ def get_forecast_text(pressure_station: float, temp_now: float) -> str:
     acceleration = get_pressure_acceleration()
     temp_range = get_temp_range_24h()
 
-    # --- Trend principale (3h) ---
     if delta_3h >= 1.6:
         trend, trend_icon = "in rapida salita", "⬆️"
     elif delta_3h >= 0.5:
@@ -218,7 +232,6 @@ def get_forecast_text(pressure_station: float, temp_now: float) -> str:
     else:
         trend, trend_icon = "stabile", "➡️"
 
-    # --- Previsione base su soglie stagionali ---
     if pressure_slp >= t["alta"]:
         if temp_range is not None and temp_range < 4 and season in ("inverno", "autunno") and delta_3h >= -0.5:
             forecast = "🌫️ Alta pressione stabile — possibile nebbia/foschia in pianura"
@@ -248,14 +261,12 @@ def get_forecast_text(pressure_station: float, temp_now: float) -> str:
         else:
             forecast = "🌧️ Perturbato, piogge probabili"
 
-    # --- Nota di accelerazione, se significativa ---
     accel_note = ""
     if acceleration is not None and acceleration <= -0.5:
         accel_note = "\n⚠️ Il calo di pressione si sta intensificando"
     elif acceleration is not None and acceleration >= 0.5:
         accel_note = "\n✅ Il trend di miglioramento si sta rafforzando"
 
-    # --- Riepilogo trend multi-finestra ---
     def fmt(v):
         return f"{v:+.1f}" if v is not None else "n/d"
 
@@ -271,6 +282,133 @@ def get_forecast_text(pressure_station: float, temp_now: float) -> str:
         f"<i>Pressione slm: {pressure_slp:.1f} hPa (stagione: {season})</i>"
     )
 
+
+# =====================================================================
+# ALLERTE UFFICIALI: METEOALARM
+# =====================================================================
+
+def get_meteoalarm_lombardia():
+    """
+    Scarica il feed METEOALARM Italia e ritorna la lista di allerte attive
+    per la Lombardia, con titolo, colore e dettaglio zona (dal summary).
+    """
+    try:
+        resp = requests.get(METEOALARM_URL, timeout=10)
+        if resp.status_code != 200:
+            return []
+    except Exception as e:
+        print(f"[ERRORE] Recupero feed METEOALARM fallito: {e}")
+        return []
+
+    try:
+        ns = {"atom": "http://www.w3.org/2005/Atom"}
+        root = ET.fromstring(resp.content)
+        alerts = []
+
+        for entry in root.findall("atom:entry", ns):
+            title_el = entry.find("atom:title", ns)
+            title = title_el.text if title_el is not None else ""
+
+            if "Lombardia" not in title:
+                continue
+
+            color = None
+            if "Red" in title:
+                color = "rossa"
+            elif "Orange" in title:
+                color = "arancione"
+            elif "Yellow" in title:
+                color = "gialla"
+
+            if not color:
+                continue
+
+            summary_el = entry.find("atom:summary", ns)
+            summary = summary_el.text if summary_el is not None else ""
+            zone_match = re.search(r"intensi\s+([A-ZÀÈÌÒÙ\s]+?)(?:\s*\(DISCLAIMER|\.|\n)", summary)
+            zone = zone_match.group(1).strip() if zone_match else None
+
+            alerts.append({"title": title, "color": color, "zone": zone})
+
+        return alerts
+    except Exception as e:
+        print(f"[ERRORE] Parsing feed METEOALARM fallito: {e}")
+        return []
+
+
+# =====================================================================
+# ALLERTE UFFICIALI: BOLLETTINO DPC (PROTEZIONE CIVILE NAZIONALE)
+# =====================================================================
+
+def get_dpc_latest_bulletin():
+    """
+    Trova e scarica il bollettino di criticità DPC più recente per la data odierna
+    interrogando l'API GitHub (git trees) del repository pcm-dpc.
+    """
+    today_prefix = datetime.now().strftime("%Y%m%d")
+
+    try:
+        resp = requests.get(DPC_REPO_API, timeout=15, headers={"Accept": "application/vnd.github+json"})
+        if resp.status_code != 200:
+            print(f"[ERRORE] GitHub API risposta {resp.status_code}")
+            return None
+        tree = resp.json().get("tree", [])
+    except Exception as e:
+        print(f"[ERRORE] Recupero albero repo DPC fallito: {e}")
+        return None
+
+    candidates = [
+        item["path"] for item in tree
+        if item["path"].startswith(f"files/{today_prefix}_") and item["path"].endswith(".json")
+        and item["path"].count("/") == 1  # esclude sottocartelle (topojson/, pdf/, xml/, shp/, all/)
+    ]
+
+    if not candidates:
+        return None  # bollettino di oggi non ancora pubblicato
+
+    latest_file = sorted(candidates)[-1]
+    raw_url = f"{DPC_RAW_BASE}/{latest_file}"
+
+    try:
+        resp = requests.get(raw_url, timeout=10)
+        if resp.status_code == 200:
+            return resp.json()
+    except Exception as e:
+        print(f"[ERRORE] Download bollettino DPC fallito: {e}")
+
+    return None
+
+
+def get_civil_protection_alert():
+    """
+    Scarica il bollettino di criticità nazionale DPC di oggi e verifica
+    se la Lombardia è citata nelle allerte.
+    Ritorna (livello, zone) oppure ("verde", None) se non citata, o (None, None) se non disponibile.
+    """
+    data = get_dpc_latest_bulletin()
+    if data is None:
+        return None, None
+
+    html = data.get("today", {}).get("html_descrition", "")
+
+    if "Lombardia" not in html:
+        return "verde", None
+
+    matches = re.findall(
+        r"ALLERTA (GIALLA|ARANCIONE|ROSSA):</b><br\s*/><b>Lombardia</b>:\s*([^<]+)",
+        html
+    )
+
+    if not matches:
+        return "verde", None
+
+    livello, zone = matches[0]
+    return livello.lower(), zone.strip()
+
+
+# =====================================================================
+# ALLERTE DI EMERGENZA (loop rapido)
+# =====================================================================
 
 def check_emergency():
     global last_alert_time
@@ -288,10 +426,8 @@ def check_emergency():
     temp_delta = (temp_vals[-1] - temp_vals[0]) if len(temp_vals) >= 2 else 0
     acceleration = get_pressure_acceleration()
 
-    # Allerta standard sulla soglia assoluta di calo in 30 min
     triggered = pressure_delta <= -PRESSURE_DROP_THRESHOLD
 
-    # Allerta anticipata se il calo sta accelerando fortemente, anche sotto soglia
     early_warning = (
         not triggered
         and acceleration is not None
@@ -328,6 +464,10 @@ def check_emergency():
         last_alert_time = now
 
 
+# =====================================================================
+# BOLLETTINO PERIODICO
+# =====================================================================
+
 def send_periodic_report():
     pressure_vals, temp_vals = get_recent_data(10)
 
@@ -351,8 +491,41 @@ def send_periodic_report():
     if lux_condition:
         message += f"\n\n<b>Cielo attuale:</b> {lux_condition}"
 
+    # --- Sezione allerte ufficiali ---
+    alert_icons = {"gialla": "🟡", "arancione": "🟠", "rossa": "🔴", "verde": "🟢"}
+    severity_order = {"gialla": 1, "arancione": 2, "rossa": 3}
+
+    message += "\n\n<b>━━ Allerte ufficiali ━━</b>"
+
+    # METEOALARM
+    meteoalarm_alerts = get_meteoalarm_lombardia()
+    if meteoalarm_alerts:
+        worst = max(meteoalarm_alerts, key=lambda a: severity_order[a["color"]])
+        icon = alert_icons[worst["color"]]
+        message += f"\n{icon} <b>METEOALARM: {worst['color'].upper()}</b>"
+        for a in meteoalarm_alerts:
+            zone_text = f" ({a['zone']})" if a["zone"] else ""
+            message += f"\n  • {a['title'].split(' - ')[0]}{zone_text}"
+    else:
+        message += "\n🟢 METEOALARM: nessuna allerta attiva"
+
+    # Protezione Civile (DPC)
+    dpc_level, dpc_zones = get_civil_protection_alert()
+    if dpc_level and dpc_level != "verde":
+        icon = alert_icons.get(dpc_level, "⚪")
+        message += f"\n{icon} <b>Protezione Civile: {dpc_level.upper()}</b>"
+        if dpc_zones:
+            message += f"\n  • Zone: {dpc_zones}"
+    elif dpc_level == "verde":
+        message += "\n🟢 Protezione Civile: nessuna allerta attiva"
+    # se dpc_level è None (bollettino non disponibile), non aggiunge nulla
+
     send_telegram(message)
 
+
+# =====================================================================
+# MAIN LOOP
+# =====================================================================
 
 def main():
     print(f"[AVVIO] Bot Telegram LegmaMiteo — stazione {STATION_ID}")
