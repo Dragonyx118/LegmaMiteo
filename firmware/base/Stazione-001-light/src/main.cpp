@@ -490,8 +490,50 @@ const uint32_t SD_SOGLIA_BACKLOG_MEDIO_BYTES      = 50000;   // ~50KB
 const uint32_t SD_SOGLIA_BACKLOG_GRANDE_BYTES     = 500000;  // ~500KB
 
 const unsigned long SD_FLUSH_DELAY_NORMALE_MS = 50;
-const unsigned long SD_FLUSH_DELAY_AGGRESSIVO_MS = 8;
+const unsigned long SD_FLUSH_DELAY_AGGRESSIVO_MS = 2;
 const int SD_FLUSH_MAX_ROWS_PER_CYCLE_NORMALE = 10;
+
+// Invece di cancellare /backup.jsonl quando risulta "tutto inviato", lo
+// rinomina con un timestamp e ne parte uno nuovo vuoto. Questo è un
+// margine di sicurezza: mqtt.publish() (QoS 0, "fire-and-forget")
+// conferma solo che il pacchetto è stato scritto sulla connessione
+// TCP/TLS, MAI che Mosquitto l'abbia davvero ricevuto o che
+// Telegraf/InfluxDB l'abbiano processato. Durante periodi di rete
+// instabile (DNS/Funnel flaky, come abbiamo visto più volte), è
+// possibile che alcune letture vengano marcate "inviate con successo"
+// lato stazione ma non arrivino mai a destinazione. Con la cancellazione
+// automatica, quei dati sparivano per sempre senza lasciare traccia.
+// Archiviando invece di cancellare, restano sulla SD come rete di
+// sicurezza recuperabile a mano se si notano buchi nei dati su Grafana.
+//
+// NOTA: questo consuma progressivamente più spazio sulla SD nel tempo
+// (i file archiviati non vengono mai cancellati automaticamente) — vale
+// la pena controllare/ripulire manualmente la SD ogni tanto, specie se
+// il backlog recuperato è spesso grande.
+void archiviaBacklogInveceDiCancellare() {
+  String ts = getTimestamp(); // "YYYY-MM-DD HH:MM:SS" o zeri se NTP non disponibile
+  ts.replace(' ', '_');
+  ts.replace(':', '-');
+  String nomeArchivio = "/archivio_" + ts + ".jsonl";
+
+  if (SD.exists(nomeArchivio)) {
+    // Timestamp duplicato (raro, capiterebbe solo se NTP non è mai
+    // sincronizzato e resta sempre "0000-00-00..."): aggiungo un
+    // suffisso basato su millis() per evitare di sovrascrivere un
+    // archivio precedente.
+    nomeArchivio = "/archivio_" + ts + "_" + String(millis()) + ".jsonl";
+  }
+
+  if (SD.rename("/backup.jsonl", nomeArchivio.c_str())) {
+    Serial.println("[SD-RECOVERY] Backlog archiviato come: " + nomeArchivio);
+  } else {
+    // Se anche il rename fallisce per qualche motivo, meglio cancellare
+    // (comportamento precedente) piuttosto che lasciare un offset
+    // disallineato con un file che non si riesce a rinominare.
+    Serial.println("[SD-RECOVERY] Rename archivio fallito, elimino il file.");
+    SD.remove("/backup.jsonl");
+  }
+}
 
 void svuotaCodaSD() {
   if (!SD.exists("/backup.jsonl")) {
@@ -510,7 +552,7 @@ void svuotaCodaSD() {
 
   if (sdReadOffset >= fileSize) {
     file.close();
-    SD.remove("/backup.jsonl");
+    archiviaBacklogInveceDiCancellare();
     sdReadOffset = 0;
     return;
   }
@@ -605,9 +647,9 @@ void svuotaCodaSD() {
   file.close();
 
   if (sdReadOffset >= fileSize) {
-    SD.remove("/backup.jsonl");
+    archiviaBacklogInveceDiCancellare();
     sdReadOffset = 0;
-    Serial.printf("[SD-RECOVERY] Lotto inviato: %d righe. Coda SD svuotata.\n", righeInviate);
+    Serial.printf("[SD-RECOVERY] Lotto inviato: %d righe. Coda SD svuotata (archiviata, non cancellata).\n", righeInviate);
     return;
   }
 
