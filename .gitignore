@@ -86,3 +86,7 @@ firmware/base/Stazione-001/src/secrets.h
 
 **/secrets.h
 /server/influxdb-backup-*/
+
+*.key
+*.crt
+.env
