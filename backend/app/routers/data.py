@@ -9,6 +9,7 @@ from influxdb_client import InfluxDBClient
 from datetime import datetime
 from app.config import STATION_ALTITUDE_M
 from app.services.forecast import compute_forecast
+from app.services.official_alerts import get_official_alerts_summary
 
 router = APIRouter(prefix="/data", tags=["Data"])
 
@@ -224,3 +225,12 @@ def get_forecast(station_id: str, module: str = "base"):
         raise HTTPException(status_code=500, detail=str(e))
     finally:
         client.close()
+        
+@router.get("/{station_id}/official-alerts")
+def get_official_alerts(station_id: str, region: str = "Lombardia"):
+    """Allerte ufficiali attive (METEOALARM + Protezione Civile) per la regione della stazione."""
+    try:
+        alerts = get_official_alerts_summary(region)
+        return {"success": True, "station_id": station_id, "alerts": alerts}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
