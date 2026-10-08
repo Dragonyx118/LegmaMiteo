@@ -11,22 +11,11 @@ from app.config import API_VERSION, PROJECT_NAME
 app = FastAPI(
     title=PROJECT_NAME,
     version=API_VERSION,
+    root_path="/api",  # <- Questa è l'unica cosa che serve a FastAPI per capire il proxy
     description="""
 ## LegmaMiteo Weather Station API
 
 API pubblica per accedere ai dati della rete di stazioni meteo LegmaMiteo.
-
-### Dati disponibili
-- **BASE** — Temperatura, umidità, pressione, luce, vento, pioggia
-- **MOD-AIR** — PM1/PM2.5/PM10, CO2, VOC, AQI
-- **MOD-STORM** — Fulmini, pressione delta, temperatura cielo, vibrazioni
-
-### Licenza dati
-I dati sono rilasciati sotto **CC BY-NC 4.0**.
-Vietato uso militare, sorveglianza e training AI senza permesso esplicito.
-
-### Repository
-[github.com/Dragonyx118/LegmaMiteo](https://github.com/Dragonyx118/LegmaMiteo)
     """,
     license_info={
         "name": "Hippocratic License HL3-CL-ECO-LAW-MIL-SV",
@@ -34,7 +23,7 @@ Vietato uso militare, sorveglianza e training AI senza permesso esplicito.
     }
 )
 
-# --- CORS — permette accesso da browser esterni ---
+# --- CORS ---
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
@@ -52,7 +41,7 @@ def root():
     return {
         "project": PROJECT_NAME,
         "version": API_VERSION,
-        "docs": "/docs",
+        "docs": "/api/docs (AGGIORNATO)",  # <- Se non vedi questa scritta online, il codice non si è aggiornato!
         "github": "https://github.com/Dragonyx118/LegmaMiteo"
     }
 

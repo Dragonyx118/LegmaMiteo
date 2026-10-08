@@ -1,13 +1,13 @@
 # ===========================================
-# LegmaMiteo — Self-heal automatico Funnel/DNS Tailscale
+# LegmaMiteo - Self-heal automatico Funnel/DNS Tailscale
 # ===========================================
 # Verifica periodicamente se il DNS pubblico del Funnel risolve
 # correttamente. Se fallisce, prova prima un semplice restart del
 # container; se anche questo non basta, forza un logout+re-registrazione
 # completa (lo stesso intervento manuale che risolveva il problema).
 #
-# Pensato per girare come Attività Pianificata di Windows ogni 10-15
-# minuti, così il problema si ripara da solo senza intervento manuale.
+# Pensato per girare come Attivita' Pianificata di Windows ogni 10-15
+# minuti, cosi' il problema si ripara da solo senza intervento manuale.
 
 $hostname = "legmamiteo-server.tail1c95b4.ts.net"
 $containerName = "legmamiteo-tailscale"   # Nome del container: usato con "docker exec"
@@ -31,8 +31,8 @@ function Test-DnsPubblico {
 
 function Test-ServerAttivo {
     # Verifica che il resto dello stack (non solo Tailscale) sia
-    # effettivamente in esecuzione, cioè che Docker Desktop sia aperto e
-    # i container principali siano su. Se il server è spento
+    # effettivamente in esecuzione, cioe' che Docker Desktop sia aperto e
+    # i container principali siano su. Se il server e' spento
     # intenzionalmente, non ha senso tentare nessuna riparazione: non
     # aggiunge nulla e potrebbe fare un logout inutile mentre semplicemente
     # non hai ancora acceso nulla.
@@ -50,7 +50,7 @@ if (-not (Test-ServerAttivo)) {
     exit 0
 }
 
-# Legge quanti tentativi di riparazione consecutivi sono già stati fatti,
+# Legge quanti tentativi di riparazione consecutivi sono gia' stati fatti,
 # per evitare di fare logout ripetuti a raffica se il problema persiste
 # per motivi esterni (es. vero disservizio Tailscale).
 $tentativiConsecutivi = 0
@@ -68,25 +68,33 @@ if (Test-DnsPubblico) {
 Scrivi-Log "PROBLEMA: DNS pubblico NON risolve per $hostname."
 
 if ($tentativiConsecutivi -eq 0) {
-    # Primo fallimento: prova prima il tentativo più leggero (restart semplice).
+    # Primo fallimento: prova prima il tentativo piu' leggero (restart semplice).
     Scrivi-Log "Tentativo 1: restart semplice del container Tailscale."
     docker compose restart $serviceName 2>&1 | Out-File -FilePath $logFile -Append -Encoding utf8
     Start-Sleep -Seconds 15
     docker exec $containerName tailscale funnel --bg 3000 2>&1 | Out-File -FilePath $logFile -Append -Encoding utf8
     docker exec $containerName tailscale funnel --bg --tcp 8443 8883 2>&1 | Out-File -FilePath $logFile -Append -Encoding utf8
+    # Mosquitto condivide la rete di Tailscale (network_mode: service:tailscale):
+    # dopo un restart di Tailscale va riavviato anche lui, altrimenti puo' restare
+    # agganciato alla vecchia rete e rifiutare le connessioni sulla 8883.
+    docker compose restart mosquitto 2>&1 | Out-File -FilePath $logFile -Append -Encoding utf8
 } elseif ($tentativiConsecutivi -ge 2) {
-    # Fallito già 2 volte di fila: passa al logout+re-registrazione completa.
+    # Fallito gia' 2 volte di fila: passa al logout+re-registrazione completa.
     Scrivi-Log "Tentativo $($tentativiConsecutivi + 1): restart semplice non bastava, provo logout + re-registrazione completa."
     docker exec $containerName tailscale logout 2>&1 | Out-File -FilePath $logFile -Append -Encoding utf8
     docker compose restart $serviceName 2>&1 | Out-File -FilePath $logFile -Append -Encoding utf8
     Start-Sleep -Seconds 20
     docker exec $containerName tailscale funnel --bg 3000 2>&1 | Out-File -FilePath $logFile -Append -Encoding utf8
     docker exec $containerName tailscale funnel --bg --tcp 8443 8883 2>&1 | Out-File -FilePath $logFile -Append -Encoding utf8
+    # Mosquitto condivide la rete di Tailscale (network_mode: service:tailscale):
+    # dopo un restart di Tailscale va riavviato anche lui, altrimenti puo' restare
+    # agganciato alla vecchia rete e rifiutare le connessioni sulla 8883.
+    docker compose restart mosquitto 2>&1 | Out-File -FilePath $logFile -Append -Encoding utf8
 
     # ATTENZIONE: dopo un logout, l'hostname potrebbe cambiare (es. tornare
-    # con suffisso -1 se il vecchio nodo non si è ancora liberato). Il
-    # log seguente aiuta a scoprirlo subito, ma servirà comunque
-    # aggiornare manualmente secrets.h se è cambiato.
+    # con suffisso -1 se il vecchio nodo non si e' ancora liberato). Il
+    # log seguente aiuta a scoprirlo subito, ma servira' comunque
+    # aggiornare manualmente secrets.h se e' cambiato.
     $statoAttuale = docker exec $containerName tailscale status 2>&1
     Scrivi-Log "Stato Tailscale dopo re-registrazione: $statoAttuale"
 } else {
