@@ -10,6 +10,9 @@ services:
     image: tailscale/tailscale:latest
     container_name: legmamiteo-tailscale
     hostname: legmamiteo-server
+    ports:
+      - "3000:3000"
+      - "8000:8000"
     environment:
       - TS_AUTHKEY=${TS_AUTHKEY}
       - TS_STATE_DIR=/var/lib/tailscale
@@ -70,19 +73,19 @@ services:
   grafana:
     image: grafana/grafana:10.4.0
     container_name: legmamiteo-grafana
-    ports:
-      - "3000:3000"
+    network_mode: "service:tailscale"
     volumes:
       - grafana-data:/var/lib/grafana
     environment:
       - GF_SECURITY_ADMIN_USER=admin
       - GF_SECURITY_ADMIN_PASSWORD=${GRAFANA_ADMIN_PASSWORD}
       - GF_USERS_ALLOW_SIGN_UP=false
+      - GF_SERVER_DOMAIN=legmamiteo-server.tail1c95b4.ts.net
+      - GF_SERVER_ROOT_URL=https://legmamiteo-server.tail1c95b4.ts.net/
     depends_on:
+      - tailscale
       - influxdb
     restart: unless-stopped
-    networks:
-      - legmamiteo-network
   # --- Telegram Notification Bot ---
   telegram-bot:
     build:
@@ -105,16 +108,14 @@ services:
       context: ../backend
       dockerfile: Dockerfile
     container_name: legmamiteo-api
-    ports:
-      - "8000:8000"
+    network_mode: "service:tailscale"
     env_file:
       - .env
     depends_on:
+      - tailscale
       - influxdb
       - mosquitto
     restart: unless-stopped
-    networks:
-      - legmamiteo-network
 
 networks:
   legmamiteo-network:
