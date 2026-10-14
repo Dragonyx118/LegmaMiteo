@@ -29,6 +29,12 @@ services:
     restart: unless-stopped
     networks:
       - legmamiteo-network
+    healthcheck:
+      test: ["CMD", "tailscale", "status"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+      start_period: 10s
 
   mosquitto:
     image: eclipse-mosquitto:2
@@ -41,7 +47,8 @@ services:
       - ./mosquitto/log:/mosquitto/log
     restart: unless-stopped
     depends_on:
-      - tailscale
+      tailscale:
+        condition: service_healthy
 
   telegraf:
     image: telegraf:1.30
@@ -83,9 +90,12 @@ services:
       - GF_SERVER_DOMAIN=legmamiteo-server.tail1c95b4.ts.net
       - GF_SERVER_ROOT_URL=https://legmamiteo-server.tail1c95b4.ts.net/
     depends_on:
-      - tailscale
-      - influxdb
+      tailscale:
+        condition: service_healthy
+      influxdb:
+        condition: service_started
     restart: unless-stopped
+
   # --- Telegram Notification Bot ---
   telegram-bot:
     build:
@@ -112,9 +122,12 @@ services:
     env_file:
       - .env
     depends_on:
-      - tailscale
-      - influxdb
-      - mosquitto
+      tailscale:
+        condition: service_healthy
+      influxdb:
+        condition: service_started
+      mosquitto:
+        condition: service_started
     restart: unless-stopped
 
 networks:
@@ -124,4 +137,3 @@ networks:
 volumes:
   grafana-data:
   tailscale-state:
-
