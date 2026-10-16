@@ -11,7 +11,7 @@ from app.config import API_VERSION, PROJECT_NAME
 app = FastAPI(
     title=PROJECT_NAME,
     version=API_VERSION,
-    root_path="/api",  # <- Questa è l'unica cosa che serve a FastAPI per capire il proxy
+    root_path="/api",
     description="""
 ## LegmaMiteo Weather Station API
 
@@ -41,7 +41,7 @@ def root():
     return {
         "project": PROJECT_NAME,
         "version": API_VERSION,
-        "docs": "/api/docs (AGGIORNATO)",  # <- Se non vedi questa scritta online, il codice non si è aggiornato!
+        "docs": "/api/docs (AGGIORNATO)",
         "github": "https://github.com/Dragonyx118/LegmaMiteo"
     }
 

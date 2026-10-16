@@ -6,10 +6,7 @@
 
 from datetime import datetime, timezone
 from .solar import clear_sky_lux_estimate
-
-STATION_LAT = 45.3667  # coordinate reali della stazione
-STATION_LON = 9.6833
-
+from ..models.stations_registry import get_station_meta
 
 def sea_level_pressure(station_pressure_hpa: float, altitude_m: float, temp_c: float) -> float:
     """Corregge la pressione stazione al livello del mare (formula barometrica standard)."""
@@ -153,6 +150,7 @@ def _apply_lightning_override(
 
 
 def compute_forecast(
+    station_id: str,
     pressure_station: float,
     temp_now: float,
     altitude_m: float,
@@ -162,12 +160,12 @@ def compute_forecast(
     acceleration: float | None = None,
     temp_range_24h: float | None = None,
     humidity: float | None = None,
-    lux: float | None = None,                         # VEML7700, lettura grezza
-    dt_utc: datetime | None = None,                    # timestamp della lettura, per calcolo solare
-    latitude_deg: float = STATION_LAT,
-    longitude_deg: float = STATION_LON,
-    lightning_distance_km: float | None = None,        # AS3935
-    lightning_strikes_last_hour: int | None = None,    # AS3935
+    lux: float | None = None,
+    dt_utc: datetime | None = None,
+    latitude_deg: float | None = None,
+    longitude_deg: float | None = None,
+    lightning_distance_km: float | None = None,
+    lightning_strikes_last_hour: int | None = None,
 ) -> dict:
     """
     Calcola la previsione barometrica a breve termine (oggi) più un'estrapolazione
@@ -175,6 +173,11 @@ def compute_forecast(
     Il calcolo del lux atteso a cielo sereno è fatto qui internamente (via solar.py),
     quindi il chiamante passa solo `lux` grezzo e `dt_utc`, non più valori precalcolati.
     """
+    if latitude_deg is None or longitude_deg is None:
+        meta = get_station_meta(station_id) or {}
+        latitude_deg = latitude_deg if latitude_deg is not None else meta.get("latitude", 45.3667)
+        longitude_deg = longitude_deg if longitude_deg is not None else meta.get("longitude", 9.6833)
+
     pressure_slp = sea_level_pressure(pressure_station, altitude_m, temp_now)
     season = get_season(month)
     t = SEASONAL_THRESHOLDS[season]

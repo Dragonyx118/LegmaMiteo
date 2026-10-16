@@ -1,0 +1,9 @@
+{
+  "station-001": {
+    "name": "Stazione Campagnola Cremasca",
+    "latitude": 45.3667,
+    "longitude": 9.6833,
+    "altitude": 84,
+    "modules": ["base"]
+  }
+}

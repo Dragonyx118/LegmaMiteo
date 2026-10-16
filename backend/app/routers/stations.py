@@ -8,7 +8,10 @@ from app.models.schemas import StationInfo, APIResponse
 from app.config import INFLUX_URL, INFLUX_TOKEN, INFLUX_ORG, INFLUX_BUCKET
 from influxdb_client import InfluxDBClient
 from influxdb_client.client.write_api import SYNCHRONOUS
+from app.models.stations_registry import load_registry
 
+
+ACTIVE_THRESHOLD_SECONDS = 60
 router = APIRouter(prefix="/stations", tags=["Stations"])
 
 def get_influx_client():
@@ -39,6 +42,47 @@ def list_stations():
                 if len(parts) >= 2:
                     stations.append({"station_id": parts[1], "topic": topic})
         return {"success": True, "stations": stations}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+    finally:
+        client.close()
+
+@router.get("/active")
+def list_active_stations():
+    """Stazioni che hanno inviato dati negli ultimi 60s, con coordinate dal registry."""
+    client = get_influx_client()
+    query_api = client.query_api()
+
+    query = f'''
+    from(bucket: "{INFLUX_BUCKET}")
+      |> range(start: -{ACTIVE_THRESHOLD_SECONDS}s)
+      |> filter(fn: (r) => r._measurement == "weather_station")
+      |> keep(columns: ["topic"])
+      |> distinct(column: "topic")
+    '''
+
+    try:
+        result = query_api.query(query)
+        registry = load_registry()
+        stations = []
+
+        for table in result:
+            for record in table.records:
+                topic = record.values.get("topic", "")
+                parts = topic.split("/")
+                if len(parts) < 2:
+                    continue
+                station_id = parts[1]
+                meta = registry.get(station_id, {})
+                stations.append({
+                    "station_id": station_id,
+                    "name": meta.get("name"),
+                    "latitude": meta.get("latitude"),
+                    "longitude": meta.get("longitude"),
+                    "altitude": meta.get("altitude"),
+                })
+
+        return {"success": True, "count": len(stations), "stations": stations}
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
     finally:

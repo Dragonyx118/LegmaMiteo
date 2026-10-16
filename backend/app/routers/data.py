@@ -4,12 +4,12 @@
 # ===========================================
 
 from fastapi import APIRouter, HTTPException, Query
-from app.config import INFLUX_URL, INFLUX_TOKEN, INFLUX_ORG, INFLUX_BUCKET
+from app.config import INFLUX_URL, INFLUX_TOKEN, INFLUX_ORG, INFLUX_BUCKET, STATION_ALTITUDE_M
 from influxdb_client import InfluxDBClient
 from datetime import datetime
-from app.config import STATION_ALTITUDE_M
 from app.services.forecast import compute_forecast
 from app.services.official_alerts import get_official_alerts_summary
+from app.models.stations_registry import get_station_meta
 
 router = APIRouter(prefix="/data", tags=["Data"])
 
@@ -158,6 +158,25 @@ def _query_recent_values(client, station_id: str, module: str, field: str, minut
     return values
 
 
+def _query_latest_value(client, station_id: str, module: str, field: str, minutes: int):
+    """Ultimo valore di un campo negli ultimi N minuti (None se assente — usato per lightning,
+    che non è presente in ogni ciclo come pressure/temperature)."""
+    query_api = client.query_api()
+    query = f'''
+    from(bucket: "{INFLUX_BUCKET}")
+      |> range(start: -{minutes}m)
+      |> filter(fn: (r) => r._measurement == "weather_station")
+      |> filter(fn: (r) => r.topic == "station/{station_id}/{module}")
+      |> filter(fn: (r) => r._field == "{field}")
+      |> last()
+    '''
+    result = query_api.query(query)
+    for table in result:
+        for record in table.records:
+            return record.get_value()
+    return None
+
+
 def _query_single_mean(client, station_id: str, module: str, field: str, start: str, stop: str):
     """Media di un campo in una finestra temporale specifica (per il confronto 24h)."""
     query_api = client.query_api()
@@ -207,15 +226,29 @@ def get_forecast(station_id: str, module: str = "base"):
         temp_vals_24h = _query_recent_values(client, station_id, module, "temperature", 24 * 60)
         temp_range_24h = (max(temp_vals_24h) - min(temp_vals_24h)) if temp_vals_24h else None
 
+        # NEW — dati AS3935 (lightning), ultimo valore noto nella finestra recente.
+        # Nessun aggregateWindow qui: a differenza di pressure/temp, il fulmine
+        # non è continuo, quindi ha senso solo "l'ultimo rilevato", non una media.
+        lightning_distance_km = _query_latest_value(client, station_id, module, "lightning_distance_km", 30)
+        lightning_strikes_last_hour = _query_latest_value(client, station_id, module, "lightning_strikes_last_hour", 60)
+
+        # NEW — coordinate/altitudine da registry invece che costanti fisse,
+        # con fallback a STATION_ALTITUDE_M se la stazione non è ancora nel registry
+        meta = get_station_meta(station_id) or {}
+        altitude = meta.get("altitude", STATION_ALTITUDE_M)
+
         result = compute_forecast(
+            station_id=station_id,
             pressure_station=pressure_vals_10[-1],
             temp_now=temp_vals_10[-1],
-            altitude_m=STATION_ALTITUDE_M,
+            altitude_m=altitude,
             month=datetime.now().month,
             delta_3h=delta_3h,
             delta_24h_same_hour=delta_24h,
             acceleration=acceleration,
             temp_range_24h=temp_range_24h,
+            lightning_distance_km=lightning_distance_km,
+            lightning_strikes_last_hour=lightning_strikes_last_hour,
         )
         result["delta_1h"] = delta_1h
         result["delta_6h"] = delta_6h
@@ -225,7 +258,7 @@ def get_forecast(station_id: str, module: str = "base"):
         raise HTTPException(status_code=500, detail=str(e))
     finally:
         client.close()
-        
+
 @router.get("/{station_id}/official-alerts")
 def get_official_alerts(station_id: str, region: str = "Lombardia"):
     """Allerte ufficiali attive (METEOALARM + Protezione Civile) per la regione della stazione."""

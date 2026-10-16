@@ -17,8 +17,7 @@ class StationInfo(BaseModel):
     altitude: Optional[float] = None
     modules: Optional[list[str]] = []
 
-
-# --- Dati BASE ---
+# ---- MOD-BASE ----
 class BaseData(BaseModel):
     station_id: str
     temperature: Optional[float] = None
@@ -28,6 +27,8 @@ class BaseData(BaseModel):
     wind_speed: Optional[float] = None
     wind_direction: Optional[float] = None
     rain_mm: Optional[float] = None
+    lightning_distance_km: Optional[float] = None
+    lightning_strikes_last_hour: Optional[int] = None
 
 
 # --- MOD-AIR ---
