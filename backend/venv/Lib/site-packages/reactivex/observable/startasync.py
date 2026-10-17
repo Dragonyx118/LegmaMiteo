@@ -1,0 +1,19 @@
+from collections.abc import Callable
+from typing import TypeVar
+
+from reactivex import Observable, from_future, throw
+from reactivex.typing import AnyFuture
+
+_T = TypeVar("_T")
+
+
+def start_async_(function_async: Callable[[], "AnyFuture[_T]"]) -> Observable[_T]:
+    try:
+        future = function_async()
+    except Exception as ex:  # pylint: disable=broad-except
+        return throw(ex)
+
+    return from_future(future)
+
+
+__all__ = ["start_async_"]

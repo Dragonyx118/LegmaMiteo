@@ -1,0 +1,50 @@
+import asyncio
+from typing import Any, TypeVar, cast
+
+from reactivex import Observable, abc
+from reactivex.disposable import Disposable
+from reactivex.typing import AnyFuture
+
+_T = TypeVar("_T")
+
+
+def from_future_(future: "AnyFuture[_T]") -> Observable[_T]:
+    """Converts a Future to an Observable sequence
+
+    Args:
+        future -- A future, either an :class:`asyncio.Future` or a
+            :class:`concurrent.futures.Future`.
+            https://docs.python.org/3/library/asyncio-task.html#future
+
+    Returns:
+        An Observable sequence which wraps the existing future success
+        and failure.
+    """
+
+    def subscribe(
+        observer: abc.ObserverBase[Any], scheduler: abc.SchedulerBase | None = None
+    ) -> abc.DisposableBase:
+        def done(future: "AnyFuture[_T]") -> None:
+            try:
+                value: Any = future.result()
+            except Exception as ex:
+                observer.on_error(ex)
+            except asyncio.CancelledError as ex:  # pylint: disable=broad-except
+                # asyncio.CancelledError is a BaseException, so need to cast
+                observer.on_error(cast(Exception, ex))
+            else:
+                observer.on_next(value)
+                observer.on_completed()
+
+        future.add_done_callback(done)
+
+        def dispose() -> None:
+            if future:
+                future.cancel()
+
+        return Disposable(dispose)
+
+    return Observable(subscribe)
+
+
+__all__ = ["from_future_"]
