@@ -1,16 +1,18 @@
 // =====================================================================
-// LegmaMiteo — Sketch di TEST v2
+// LegmaMiteo — Sketch di TEST v2 (configurazione finale)
 // =====================================================================
-// Rispetto alla v1: l'AS3935 ora è in modalità SPI (confermata
-// funzionante) invece di I2C. Tutti gli altri sensori restano su I2C
-// sul bus principale.
+// BMP580 e AS3935 si sono rivelati poco affidabili su I2C condiviso
+// (transazioni multi-byte che fallivano o restituivano dati fissi) e
+// sono quindi entrambi passati a SPI. Il bus I2C principale ora ha
+// solo 3 dispositivi (SHT45, MCP9808, VEML7700), molto piu' stabile.
 //
 // Pin:
-//   I2C (SHT45, MCP9808, BMP580, VEML7700): SDA=GPIO4, SCL=GPIO5
-//   SPI SD:     MISO=GPIO16, CLK=GPIO17, MOSI=GPIO15, CS=GPIO18
-//   SPI AS3935: SCK=GPIO12, MISO=GPIO13, MOSI=GPIO11, CS=GPIO10
-//               (bus SPI DIVERSO dalla SD: periferica FSPI separata,
-//               nessun pin condiviso, nessun rischio di conflitto)
+//   I2C principale (SHT45, MCP9808, VEML7700): SDA=GPIO4, SCL=GPIO5
+//   SPI condiviso SD + BMP580: SCK=GPIO17, MISO=GPIO16, MOSI=GPIO15
+//               SD_CS=GPIO18, BMP580_CS=GPIO9 (stesso bus fisico,
+//               CS diversi - SPI supporta piu' dispositivi cosi')
+//   SPI AS3935 (bus FSPI separato): SCK=GPIO12, MISO=GPIO13,
+//               MOSI=GPIO11, CS=GPIO10
 //   AS3935 IRQ: GPIO6
 //   AS3935 SI:  GND (fissa la modalità SPI)
 //
@@ -32,6 +34,11 @@
 // --- Pin I2C (sensori ambientali) ---
 const int I2C_SDA = 4;
 const int I2C_SCL = 5;
+
+// --- BMP580 ora in SPI, sullo stesso bus fisico della SD (SCK=17,
+// MISO=16, MOSI=15) ma con CS dedicato - SPI supporta piu' dispositivi
+// sullo stesso bus, ognuno selezionato dal proprio CS.
+const int BMP580_CS = 9;
 
 // --- Pin SPI (SD card) ---
 const int SD_SPI_MISO = 16;
@@ -176,6 +183,14 @@ void setup() {
   pinMode(AS3935_IRQ_PIN, INPUT);
 
   Wire.begin(I2C_SDA, I2C_SCL);
+  Wire.setClock(100000); // 100kHz esplicito (invece del default, piu'
+                          // alto su alcune config ESP32) - un bus piu'
+                          // lento tollera meglio capacita' parassita e
+                          // contatti non perfetti, utile per isolare se
+                          // i fallimenti su BMP580/VEML7700 sono un
+                          // problema di integrita' del segnale
+
+
 
   delay(100); // piccola pausa per lasciare che il bus I2C si stabilizzi
               // dopo Wire.begin(), evita fallimenti transitori di begin()
@@ -206,20 +221,18 @@ void setup() {
     Serial.println("FALLITA!");
   }
 
-  // --- BMP580 ---
-  Serial.print("[BMP580] Inizializzazione... ");
-  if (bmp580.beginI2C(0x46) == BMP5_OK) {
-    // IMPORTANTE: dopo beginI2C() il sensore resta in modalità STANDBY
-    // di default - senza questa riga getSensorData() legge dati
-    // stantii/non validi (è il motivo dei valori fissi e assurdi visti
-    // nel test). NORMAL = misura continua a intervalli regolari.
-    bmp580.setMode(BMP5_POWERMODE_NORMAL);
-    Serial.println("OK.");
-  } else {
-    Serial.println("FALLITA!");
-  }
+  // --- BMP580 (ora via SPI, non piu' I2C) ---
+  // Usa il bus SPI globale (stesso della SD: SCK=17,MISO=16,MOSI=15),
+  // con il proprio CS dedicato. SPI.begin() per questo bus viene
+  // chiamato piu' sotto insieme all'inizializzazione della SD - deve
+  // essere gia' avvenuto prima di chiamare beginSPI() qui, quindi
+  // spostiamo l'inizializzazione del BMP580 DOPO quella della SD.
+  pinMode(BMP580_CS, OUTPUT);
+  digitalWrite(BMP580_CS, HIGH);
 
-  // --- VEML7700 --- (stesso retry di SHT45, stesso motivo)
+  // --- VEML7700 --- (tornato sul bus principale, ora che il BMP580 e'
+  // passato a SPI il bus I2C ha un dispositivo in meno e dovrebbe
+  // restare stabile senza bisogno di isolarlo)
   Serial.print("[VEML7700] Inizializzazione... ");
   bool veml7700Ok = veml7700.begin();
   if (!veml7700Ok) {
@@ -249,6 +262,17 @@ void setup() {
     Serial.println("FALLITA!");
   }
 
+  // --- BMP580 via SPI (bus condiviso con la SD, CS dedicato) ---
+  // SPI.begin() e' gia' stato chiamato sopra per la SD, quindi il bus
+  // fisico e' gia' attivo: qui serve solo beginSPI() con il CS giusto.
+  Serial.print("[BMP580] Inizializzazione (SPI, CS=9)... ");
+  int8_t bmp580Err = bmp580.beginSPI(BMP580_CS, 2000000);
+  if (bmp580Err == BMP5_OK) {
+    Serial.println("OK.");
+  } else {
+    Serial.printf("FALLITA! Codice errore: %d\n", bmp580Err);
+  }
+
   // --- AS3935 (SPI) ---
   pinMode(AS3935_CS, OUTPUT);
   digitalWrite(AS3935_CS, HIGH);
@@ -276,11 +300,12 @@ void loop() {
   Serial.printf("[MCP9808]  Temp: %.2f C\n", mcp9808.readTempC());
 
   bmp5_sensor_data bmpData;
-  if (bmp580.getSensorData(&bmpData) == BMP5_OK) {
+  int8_t bmp580ReadErr = bmp580.getSensorData(&bmpData);
+  if (bmp580ReadErr == BMP5_OK) {
     Serial.printf("[BMP580]   Pressione: %.2f hPa   Temp: %.2f C\n",
                   bmpData.pressure / 100.0f, bmpData.temperature);
   } else {
-    Serial.println("[BMP580]   Errore lettura.");
+    Serial.printf("[BMP580]   Errore lettura. Codice: %d\n", bmp580ReadErr);
   }
 
   Serial.printf("[VEML7700] Lux: %.2f\n", veml7700.readLux());

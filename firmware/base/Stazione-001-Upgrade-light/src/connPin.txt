@@ -12,10 +12,10 @@ Parallelo pull-up effettivo: SDA ≈ 2.7kOhm, SCL ≈ 4.2kOhm (BMP580 + SHT45; g
 === BUS I2C CONDIVISO (SDA=GPIO4, SCL=GPIO5) ===
 
 BMP580 (pressione):
-  SCL   -> GPIO5
-  SDA   -> GPIO4
-  CS    -> 3.3V   (fissa modalità I2C, NON lasciare flottante/GND)
-  SDO   -> GND    (indirizzo 0x46)
+  SCL   -> GPIO17 (CLK)
+  SDA   -> GPIO15 (MOSI)
+  CS    -> GPIO9  (CS dedicato per SPI)
+  SDO   -> GPIO16 (MISO)
   INT   -> non collegato (polling, non serve)
   VCC   -> 3.3V
   GND   -> GND
@@ -46,7 +46,7 @@ MCP9808 (temperatura):
   GND   -> GND
 
 AS3935 (fulmini):
-  SCL      -> 12 funge da clock
+  SCL      -> 12 (CLK)
   MOSI     -> 11
   MISO     -> 13
   CS       -> 3.3V    (disattiva modalità SPI)
