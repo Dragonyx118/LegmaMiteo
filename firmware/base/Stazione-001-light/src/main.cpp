@@ -4,7 +4,11 @@
 #include <PubSubClient.h>
 #include <ArduinoJson.h>
 #include <Wire.h>
-#include <Adafruit_BMP085.h>
+#include <SparkFun_BMP581_Arduino_Library.h>
+#include <Adafruit_SHT4x.h>
+#include <Adafruit_VEML7700.h>
+#include <Adafruit_MCP9808.h>
+#include <SparkFun_AS3935.h>
 #include <SPI.h>
 #include <SD.h>
 #include "time.h"
@@ -70,6 +74,8 @@ const int SPI_MISO = 16;
 const int SPI_CLK  = 17;
 const int SPI_MOSI = 15;
 const int chipSelect = 18;
+const int AS3935_CS = 9;
+const int AS3935_IRQ = 7;
 
 // --- Campionamento adattivo ---
 // In condizioni stabili si campiona ogni 30s (basso consumo, sufficiente
@@ -191,7 +197,11 @@ int resetWifiFallitiConsecutivi = 0;
 
 WiFiClientSecure wifiClient;
 PubSubClient mqtt(wifiClient);
-Adafruit_BMP085 bmp;
+BMP581 bmp580;
+Adafruit_SHT4x sht4;
+Adafruit_VEML7700 veml7700 = Adafruit_VEML7700();
+Adafruit_MCP9808 mcp9808 = Adafruit_MCP9808();
+SparkFun_AS3935 as3935;
 
 String getTimestamp() {
   struct tm timeinfo;
@@ -697,29 +707,39 @@ void scriviSuSD(String payload) {
 }
 
 void handleDataCycle(bool mqttReady) {
-  float real_temp = bmp.readTemperature();
-  float real_press = bmp.readPressure() / 100.0F;
+  bmp5_sensor_data bmpData;
+  bmp580.getSensorData(&bmpData);
+  float real_temp  = bmpData.temperature;
+  float real_press = bmpData.pressure / 100.0F;
 
   valutaCampionamentoAdattivo(real_temp, real_press);
 
-  float humidity = 0.0;
-  float lux      = 0.0;
+  sensors_event_t humidity, temp;
+  sht4.getEvent(&humidity, &temp);
+  float h = humidity.relative_humidity;
+  float vemlLux = veml7700.readLux();
+  float mcpTemp = mcp9808.readTempC();
+  int as3935Intr = as3935.readInterruptReg();
+
   float wind     = 0.0;
   float wind_dir = 0.0;
   float rain     = 0.0;
 
   JsonDocument doc;
-  doc["station_id"]      = STATION_ID;
-  doc["timestamp"]       = getTimestamp();
-  doc["temperature"]     = real_temp;
-  doc["humidity"]        = humidity;
-  doc["pressure"]        = real_press;
-  doc["lux"]             = lux;
-  doc["wind_speed"]      = wind;
-  doc["wind_direction"]  = wind_dir;
-  doc["rain_mm"]         = rain;
+  doc["station_id"]          = STATION_ID;
+  doc["timestamp"]           = getTimestamp();
+  doc["temperature"]         = real_temp;
+  doc["temperature_mcp9808"] = mcpTemp;
+  doc["temperature_sht45"]   = temp.temperature;
+  doc["humidity"]            = h;
+  doc["pressure"]            = real_press;
+  doc["lux"]                 = vemlLux;
+  doc["as3935_interrupt"]    = as3935Intr;
+  doc["wind_speed"]          = wind;
+  doc["wind_direction"]      = wind_dir;
+  doc["rain_mm"]             = rain;
 
-  char payload[256];
+  char payload[384];
   serializeJson(doc, payload);
 
   if (mqttReady && mqtt.connected()) {
@@ -815,11 +835,21 @@ void setup() {
   configTime(GMT_OFFSET_SEC, DAYLIGHT_OFFSET_SEC, NTP_SERVER, "pool.ntp.org", "time.cloudflare.com");
 
   Wire.begin(I2C_SDA, I2C_SCL);
-  if (!bmp.begin()) {
-    Serial.println("[HARDWARE] BMP180 non rilevato!");
-  } else {
-    Serial.println("[HARDWARE] BMP180 pronto.");
-  }
+  Wire.setClock(100000);
+  delay(200);
+
+  int8_t bmpErr = bmp580.beginI2C(0x46);
+  if (bmpErr == BMP5_OK) Serial.println("[BMP580] Inizializzazione I2C riuscita (0x46)!");
+  else Serial.printf("[BMP580] ERRORE di inizializzazione. Codice: %d\n", bmpErr);
+
+  if (sht4.begin(&Wire)) { sht4.setPrecision(SHT4X_HIGH_PRECISION); sht4.setHeater(SHT4X_NO_HEATER); Serial.println("[SHT45] Riuscita (0x44)!"); }
+  else Serial.println("[SHT45] FALLITA!");
+
+  if (veml7700.begin()) Serial.println("[VEML7700] Riuscita (0x10)!");
+  else Serial.println("[VEML7700] FALLITA!");
+
+  if (mcp9808.begin(0x18)) { mcp9808.setResolution(3); Serial.println("[MCP9808] Riuscita (0x18)!"); }
+  else Serial.println("[MCP9808] FALLITA!");
 
   SPI.begin(SPI_CLK, SPI_MISO, SPI_MOSI, chipSelect);
   Serial.print("[HARDWARE] Inizializzazione modulo SD... ");
@@ -827,6 +857,16 @@ void setup() {
     Serial.println("FALLITA! Controlla pin, contatti o formattazione FAT32.");
   } else {
     Serial.println("OK, MicroSD rilevata.");
+  }
+
+  if (as3935.beginSPI(AS3935_CS, 1000000, SPI)) {
+    as3935.setIndoorOutdoor(INDOOR);
+    as3935.setNoiseLevel(2);
+    as3935.watchdogThreshold(2);
+    as3935.spikeRejection(2);
+    Serial.println("[AS3935] Inizializzazione SPI riuscita!");
+  } else {
+    Serial.println("[AS3935] FALLITA!");
   }
 
   mqtt.setServer(MQTT_HOST, MQTT_PORT);

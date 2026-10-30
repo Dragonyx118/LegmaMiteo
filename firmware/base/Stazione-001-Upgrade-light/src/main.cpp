@@ -1,82 +1,864 @@
 #include <Arduino.h>
+#include <WiFi.h>
+#include <esp_wifi.h>
+#include <PubSubClient.h>
+#include <ArduinoJson.h>
 #include <Wire.h>
-#include <SPI.h>
-#include <SD.h>
 #include <SparkFun_BMP581_Arduino_Library.h>
 #include <Adafruit_SHT4x.h>
 #include <Adafruit_VEML7700.h>
 #include <Adafruit_MCP9808.h>
 #include <SparkFun_AS3935.h>
+#include <SPI.h>
+#include <SD.h>
+#include "time.h"
+#include "secrets.h"
+#include <HTTPClient.h>
+#include <WiFiClientSecure.h>
+#include "esp_sleep.h"
+#include <Adafruit_NeoPixel.h>
+#include "esp_task_wdt.h"
 
-// Pin I2C condivisi
+const int RGB_LED_PIN = 48;
+Adafruit_NeoPixel rgbLed(1, RGB_LED_PIN, NEO_GRB + NEO_KHZ800);
+
+void mostraQualitaSegnaleLed(int rssi) {
+  uint32_t colore;
+  if (rssi >= -55) {
+    colore = rgbLed.Color(0, 100, 255);
+  } else if (rssi >= -65) {
+    colore = rgbLed.Color(0, 180, 0);
+  } else if (rssi >= -75) {
+    colore = rgbLed.Color(200, 180, 0);
+  } else {
+    colore = rgbLed.Color(200, 0, 0);
+  }
+  rgbLed.setPixelColor(0, colore);
+  rgbLed.show();
+}
+
+void mostraMqttNonRaggiungibile() {
+  uint32_t arancione = rgbLed.Color(220, 90, 0);
+  rgbLed.setPixelColor(0, arancione);
+  rgbLed.show();
+}
+
+void mostraRelaNonTrovata() {
+  uint32_t colore = rgbLed.Color(180, 0, 200);
+  rgbLed.setPixelColor(0, colore);
+  rgbLed.show();
+}
+
+bool ssidVisibileInAria(const char* ssidCercato) {
+  int n = WiFi.scanNetworks();
+  for (int i = 0; i < n; i++) {
+    if (WiFi.SSID(i) == ssidCercato) {
+      WiFi.scanDelete();
+      return true;
+    }
+  }
+  WiFi.scanDelete();
+  return false;
+}
+
+const char* NTP_SERVER    = "time.google.com";
+const long  GMT_OFFSET_SEC = 3600;
+const int   DAYLIGHT_OFFSET_SEC = 3600;
+
+const char* TIME_API_URL = "https://timeapi.io/api/time/current/zone?timeZone=Europe/Rome";
+
 const int I2C_SDA = 6;
 const int I2C_SCL = 5;
 
-// Pin SPI condivisi (AS3935 sullo stesso bus della SD)
-const int SPI_SCK = 17;
 const int SPI_MISO = 16;
+const int SPI_CLK  = 17;
 const int SPI_MOSI = 15;
+const int chipSelect = 18;
 const int AS3935_CS = 9;
 const int AS3935_IRQ = 7;
-const int SD_CS = 18;
 
-// Oggetti sensori
+// --- Campionamento adattivo ---
+// In condizioni stabili si campiona ogni 30s (basso consumo, sufficiente
+// per temperatura/pressione che variano lentamente). Se si rileva un
+// calo rapido di pressione o temperatura — segnale tipico di un
+// downburst/gust front o dell'arrivo di una supercella — si passa
+// automaticamente a 10s per non perdere risoluzione temporale proprio
+// nei momenti più critici, restando in modalità veloce per un periodo
+// minimo dopo l'ultimo trigger (l'evento potrebbe continuare a
+// evolvere anche dopo il primo segnale).
+const uint64_t CICLO_STABILE_US = 30000000ULL;   // 30s
+const uint64_t CICLO_VELOCE_US  = 10000000ULL;   // 10s
+const float SOGLIA_CALO_PRESSIONE_HPA_MIN = 1.0f; // hPa/min
+const float SOGLIA_CALO_TEMPERATURA_C_MIN = 1.0f; // °C/min
+const unsigned long DURATA_MODALITA_VELOCE_MS = 15UL * 60UL * 1000UL; // 15 minuti
+
+uint64_t cicloAttualeUs = CICLO_VELOCE_US; // Parte veloce: se la connessione
+                                             // al boot fallisce, i retry sono
+                                             // ogni 10s invece di aspettare
+                                             // fino a 60s. Passa a stabile
+                                             // dopo la prima finestra senza
+                                             // eventi rapidi rilevati.
+unsigned long modalitaVeloceFinoAMillis = 0; // 0 = modalità stabile attiva
+
+bool primaLetturaAdattiva = true;
+float precTemperaturaAdattiva = 0.0f;
+float precPressioneAdattivaHpa = 0.0f;
+unsigned long precTimestampAdattivoMs = 0;
+
+// Valuta se la lettura corrente indica un evento in rapida evoluzione,
+// confrontandola con la precedente e normalizzando per il tempo
+// realmente trascorso (che varia: 10s in modalità veloce, 30s in
+// stabile). Se supera le soglie, estende/attiva la modalità veloce.
+void valutaCampionamentoAdattivo(float temperaturaAttuale, float pressioneAttualeHpa) {
+  unsigned long oraMs = millis();
+
+  if (!primaLetturaAdattiva) {
+    float deltaMinuti = (float)(oraMs - precTimestampAdattivoMs) / 60000.0f;
+    if (deltaMinuti > 0.01f) { // Evita divisioni per intervalli troppo piccoli
+      float ratePressione = (pressioneAttualeHpa - precPressioneAdattivaHpa) / deltaMinuti;
+      float rateTemperatura = fabs(temperaturaAttuale - precTemperaturaAdattiva) / deltaMinuti;
+
+      bool caloPressioneRapido = ratePressione <= -SOGLIA_CALO_PRESSIONE_HPA_MIN;
+      bool caloTemperaturaRapido = rateTemperatura >= SOGLIA_CALO_TEMPERATURA_C_MIN;
+
+      if (caloPressioneRapido || caloTemperaturaRapido) {
+        if (modalitaVeloceFinoAMillis == 0) {
+          Serial.printf("[ADATTIVO] Evento rapido rilevato (pressione: %.2f hPa/min, temperatura: %.2f C/min) - passo a campionamento veloce (10s).\n",
+                        ratePressione, rateTemperatura);
+        }
+        modalitaVeloceFinoAMillis = oraMs + DURATA_MODALITA_VELOCE_MS;
+      }
+    }
+  }
+
+  precTemperaturaAdattiva = temperaturaAttuale;
+  precPressioneAdattivaHpa = pressioneAttualeHpa;
+  precTimestampAdattivoMs = oraMs;
+  primaLetturaAdattiva = false;
+
+  if (modalitaVeloceFinoAMillis != 0 && (long)(oraMs - modalitaVeloceFinoAMillis) >= 0) {
+    Serial.println("[ADATTIVO] Nessun evento rapido da un po', torno al campionamento stabile (30s).");
+    modalitaVeloceFinoAMillis = 0;
+  }
+
+  cicloAttualeUs = (modalitaVeloceFinoAMillis != 0) ? CICLO_VELOCE_US : CICLO_STABILE_US;
+}
+
+bool timeSynchronized = false;
+uint32_t sdReadOffset = 0;
+
+// Soglia di compattazione: quando l'offset consumato (dati già inviati,
+// diventati "spazzatura" in testa al file) supera questa soglia, il
+// file viene fisicamente riscritto per liberare spazio. ATTENZIONE:
+// questa operazione riscrive tutto il file DA QUESTO PUNTO IN POI fino
+// alla fine — con backlog molto grandi (es. dopo ore/giorni offline),
+// una soglia troppo bassa fa scattare la compattazione decine di volte,
+// ognuna delle quali ricopia quasi l'intero backlog residuo (anche
+// diversi MB) solo per liberare poche centinaia di KB di spazio già
+// inviato. 5MB è un compromesso: compatta abbastanza spesso da non far
+// crescere il file all'infinito, ma abbastanza raramente da non
+// diventare il collo di bottiglia dominante durante un recupero di
+// backlog enorme (osservato: con soglia 200KB, un backlog da 19MB
+// impiegava oltre 3 minuti per singolo ciclo di compattazione).
+const uint32_t SD_COMPACT_THRESHOLD_BYTES = 5000000;
+
+// Numero massimo di cicli consecutivi in cui il socket MQTT/WiFi risulta
+// caduto prima di forzare una disconnessione WiFi completa e ripartire
+// da zero (a volte il modulo radio resta in uno stato "zombie" dopo un
+// certo numero di risvegli da light sleep: un reset periodico dello
+// stack WiFi previene questo).
+const int MAX_RICONNESSIONI_CONSECUTIVE = 6;
+int riconnessioniConsecutiveFallite = 0;
+
+// Timeout del task watchdog: se loop() non "nutre" il watchdog per più
+// di questo tempo (es. blocco per bug imprevisto, exception, deadlock),
+// l'ESP32 si riavvia da solo — equivalente automatico del pulsante
+// reset fisico. 60s dà ampio margine anche ai cicli più lunghi (es.
+// recupero backlog aggressivo, che può arrivare a ~8-9s di lavoro attivo).
+// NOTA per questa versione a light sleep reale: il timeout è più alto
+// (100s invece di 60s) perché durante esp_light_sleep_start() la CPU è
+// sospesa fino a ~58s (modalità stabile, 60s di ciclo meno overhead),
+// e il timer del watchdog potrebbe continuare a contare anche durante
+// il sonno. Un timeout troppo stretto scatenerebbe un riavvio falso
+// positivo durante un sonno legittimo, non durante un vero blocco.
+const uint32_t WATCHDOG_TIMEOUT_SEC = 100;
+
+// Se il reset completo dello stack WiFi (già tentato dopo
+// MAX_RICONNESSIONI_CONSECUTIVE fallimenti) non risolve il problema per
+// più round consecutivi, il radio potrebbe essere rimasto in uno stato
+// "bloccato" più profondo di quanto un semplice WiFi.disconnect()+begin()
+// riesca a sistemare — osservato in campo: serviva il pulsante reset
+// fisico (riavvio completo del microcontrollore) per sbloccarlo. Questa
+// soglia forza un vero esp_restart() dopo troppi round di reset WiFi
+// falliti di fila, automatizzando quello che prima richiedeva
+// l'intervento manuale.
+const int MAX_RESET_WIFI_FALLITI_CONSECUTIVI = 3;
+int resetWifiFallitiConsecutivi = 0;
+
+WiFiClientSecure wifiClient;
+PubSubClient mqtt(wifiClient);
 BMP581 bmp580;
 Adafruit_SHT4x sht4;
 Adafruit_VEML7700 veml7700 = Adafruit_VEML7700();
 Adafruit_MCP9808 mcp9808 = Adafruit_MCP9808();
 SparkFun_AS3935 as3935;
 
+String getTimestamp() {
+  struct tm timeinfo;
+  if (!getLocalTime(&timeinfo)) {
+    return "0000-00-00 00:00:00";
+  }
+  char timeStringBuff[50];
+  strftime(timeStringBuff, sizeof(timeStringBuff), "%Y-%m-%d %H:%M:%S", &timeinfo);
+  return String(timeStringBuff);
+}
+
+bool syncTimeViaHttp() {
+  if (WiFi.status() != WL_CONNECTED) return false;
+
+  WiFiClientSecure client;
+  client.setInsecure();
+
+  HTTPClient http;
+  Serial.print("[TIME-HTTP] Richiesta orario via HTTPS a timeapi.io...");
+
+  if (!http.begin(client, TIME_API_URL)) {
+    Serial.println(" Impossibile avviare la richiesta.");
+    return false;
+  }
+
+  http.setTimeout(8000);
+
+  int httpCode = http.GET();
+  if (httpCode != 200) {
+    Serial.printf(" Fallita, HTTP code=%d\n", httpCode);
+    http.end();
+    return false;
+  }
+
+  String payload = http.getString();
+  http.end();
+
+  JsonDocument doc;
+  DeserializationError err = deserializeJson(doc, payload);
+  if (err) {
+    Serial.println(" Errore nel parsing JSON della risposta.");
+    return false;
+  }
+
+  int year   = doc["year"]   | 0;
+  int month  = doc["month"]  | 0;
+  int day    = doc["day"]    | 0;
+  int hour   = doc["hour"]   | 0;
+  int minute = doc["minute"] | 0;
+  int second = doc["seconds"]| 0;
+
+  if (year < 2024) {
+    Serial.println(" Risposta JSON priva di dati orario validi.");
+    return false;
+  }
+
+  struct tm t;
+  t.tm_year = year - 1900;
+  t.tm_mon  = month - 1;
+  t.tm_mday = day;
+  t.tm_hour = hour;
+  t.tm_min  = minute;
+  t.tm_sec  = second;
+  t.tm_isdst = 0;
+
+  time_t epoch = mktime(&t);
+  struct timeval tv = { .tv_sec = epoch, .tv_usec = 0 };
+  settimeofday(&tv, NULL);
+
+  Serial.println(" OK! Orario impostato da timeapi.io.");
+  return true;
+}
+
+void trySyncTime() {
+  configTime(GMT_OFFSET_SEC, DAYLIGHT_OFFSET_SEC, NTP_SERVER, "pool.ntp.org", "time.cloudflare.com");
+
+  if (timeSynchronized) return;
+  if (WiFi.status() != WL_CONNECTED) return;
+
+  Serial.print("[TIME] Sincronizzazione orario con NTP in corso...");
+  struct tm timeinfo;
+  int ntpAttempts = 0;
+
+  while (!getLocalTime(&timeinfo) && ntpAttempts < 8) {
+    delay(500);
+    Serial.print(".");
+    ntpAttempts++;
+  }
+
+  if (ntpAttempts < 8) {
+    Serial.println("\n[TIME] Orologio interno sincronizzato con successo (NTP)!");
+    timeSynchronized = true;
+    return;
+  }
+
+  Serial.println("\n[TIME] Timeout NTP. Provo il fallback HTTP...");
+  if (syncTimeViaHttp()) {
+    timeSynchronized = true;
+  } else {
+    Serial.println("[TIME] ATTENZIONE: Fallback HTTP fallito anch'esso. Riproverò più avanti.");
+  }
+}
+
+// Connessione WiFi completa: usata solo al primo avvio o quando il radio
+// va resettato del tutto (fallback). Abilita anche il power-save del
+// modem WiFi, che è ciò che rende sostenibile tenerlo associato durante
+// il light sleep: il radio si "congela" tra un beacon interval e l'altro
+// invece di restare sempre ricevente, ma senza perdere l'associazione.
+bool connectWifiCompleto() {
+  Serial.print("[WiFi] Connessione completa in corso...");
+  WiFi.mode(WIFI_STA);
+
+  // NOTA: qui avevamo forzato un DNS statico esterno (8.8.8.8 / 1.1.1.1)
+  // per accorciare il ritardo di risoluzione DNS al boot. Rimosso: sul
+  // router di questa rete, le query DNS dirette verso resolver esterni
+  // sembrano essere bloccate/filtrate (comune su alcuni router ISP),
+  // causando un fallimento DNS permanente invece del solo ritardo
+  // iniziale di ~30s che si aveva usando il DNS fornito dal router via
+  // DHCP. Si torna quindi al comportamento di default (DNS del router).
+  WiFi.begin(WIFI_SSID, WIFI_PASSWORD);
+
+  int attempts = 0;
+  while (WiFi.status() != WL_CONNECTED && attempts < 20) {
+    delay(500);
+    Serial.print(".");
+    attempts++;
+  }
+
+  if (WiFi.status() == WL_CONNECTED) {
+    int rssi = WiFi.RSSI();
+    Serial.println("\n[WiFi] Connesso! IP: " + WiFi.localIP().toString() +
+                    " (RSSI: " + String(rssi) + " dBm)");
+    mostraQualitaSegnaleLed(rssi);
+
+    // Nota: qui in precedenza tentavamo esp_pm_configure() per il light
+    // sleep automatico coordinato da ESP-IDF, ma la build/core in uso
+    // non lo supporta (ESP_ERR_NOT_SUPPORTED). Passiamo quindi
+    // all'approccio manuale collaudato: disconnessione completa del
+    // WiFi prima del light sleep e riconnessione da zero al risveglio
+    // (vedi loop() e vaiInLightSleepReale()), pattern confermato
+    // funzionante da diversi utenti ESP32 con lo stesso problema.
+    esp_wifi_set_ps(WIFI_PS_MIN_MODEM);
+
+    trySyncTime();
+    // NOTA: qui NON azzeriamo riconnessioniConsecutiveFallite. Il WiFi
+    // può connettersi correttamente anche quando poi MQTT/DNS falliscono
+    // subito dopo (è esattamente il caso osservato in campo: WiFi
+    // sempre riuscito, ma risoluzione DNS bloccata per decine di minuti
+    // finché non si è reso necessario un riavvio fisico). Se azzerassimo
+    // qui, il contatore non arriverebbe mai alla soglia che fa scattare
+    // l'auto-riavvio (esp_restart() in loop()), perché verrebbe sempre
+    // resettato prima di poter accumulare i fallimenti MQTT. Il reset
+    // corretto avviene solo in loop() quando l'intero ciclo (WiFi+MQTT)
+    // riesce.
+    return true;
+  }
+
+  if (ssidVisibileInAria(WIFI_SSID)) {
+    Serial.println("\n[WiFi] Rete rilevata ma connessione fallita (segnale instabile o password errata).");
+    uint32_t rosso = rgbLed.Color(200, 0, 0);
+    rgbLed.setPixelColor(0, rosso);
+    rgbLed.show();
+  } else {
+    Serial.println("\n[WiFi] Rete NON rilevata nell'aria (router spento o fuori portata).");
+    mostraRelaNonTrovata();
+  }
+
+  riconnessioniConsecutiveFallite++;
+  return false;
+}
+
+bool connectMqtt() {
+  if (WiFi.status() != WL_CONNECTED) return false;
+
+  wifiClient.setInsecure();
+  wifiClient.setTimeout(10000);
+
+  Serial.print("[MQTT] Connessione TLS in corso...");
+  if (mqtt.connect(STATION_ID, MQTT_USER, MQTT_PASSWORD)) {
+    Serial.println("Connesso!");
+    return true;
+  }
+
+  Serial.print("Fallita, errore=");
+  Serial.println(mqtt.state());
+
+  // Secondo tentativo nello stesso ciclo con DNS esterno (Google/
+  // Cloudflare) al posto di quello del router. Utile su router che
+  // impiegano molto tempo a rendere operativo il proprio resolver DNS
+  // dopo una nuova associazione WiFi (osservato: 20-45s sistematici).
+  // Non sostituisce nulla in modo permanente: con l'architettura a
+  // light sleep il WiFi viene smontato e ricreato da zero ad ogni
+  // ciclo, quindi questo override si "resetta" automaticamente al
+  // ciclo successivo — sicuro anche se il router blocca il DNS esterno
+  // (in quel caso questo secondo tentativo fallisce e basta, senza
+  // lasciare alcun danno persistente).
+  IPAddress ipAttuale = WiFi.localIP();
+  IPAddress gatewayAttuale = WiFi.gatewayIP();
+  IPAddress subnetAttuale = WiFi.subnetMask();
+  IPAddress dnsEsternoPrimario(8, 8, 8, 8);
+  IPAddress dnsEsternoSecondario(1, 1, 1, 1);
+
+  if (WiFi.config(ipAttuale, gatewayAttuale, subnetAttuale, dnsEsternoPrimario, dnsEsternoSecondario)) {
+    Serial.print("[MQTT] Riprovo con DNS esterno...");
+    delay(200);
+    if (mqtt.connect(STATION_ID, MQTT_USER, MQTT_PASSWORD)) {
+      Serial.println("Connesso!");
+      return true;
+    }
+    Serial.print("Fallita anche con DNS esterno, errore=");
+    Serial.println(mqtt.state());
+  }
+
+  return false;
+}
+
+// Verifica leggera dello stato della connessione, da chiamare ad ogni
+// risveglio dal light sleep. Non fa mai un reset completo del WiFi:
+// tenta prima solo di far ripartire MQTT se il WiFi risulta ancora
+// associato (caso più comune: l'associazione WiFi sopravvive al light
+// sleep, ma il socket TCP/TLS del broker può essere stato droppato da
+// un firewall/NAT/Tailscale per inattività).
+bool assicuraConnessioneAttiva() {
+  if (WiFi.status() == WL_CONNECTED) {
+    if (mqtt.connected()) {
+      riconnessioniConsecutiveFallite = 0;
+      return true;
+    }
+
+    Serial.println("[MQTT] Socket caduto durante il light sleep, riconnessione rapida...");
+    if (connectMqtt()) {
+      riconnessioniConsecutiveFallite = 0;
+      return true;
+    }
+
+    riconnessioniConsecutiveFallite++;
+  } else {
+    Serial.println("[WiFi] Associazione persa durante il light sleep.");
+    riconnessioniConsecutiveFallite++;
+  }
+
+  // Troppi fallimenti di fila: probabile stato "zombie" dello stack
+  // WiFi. Si forza un reset completo (disconnect + reconnect da zero)
+  // invece di continuare a tentare riconnessioni parziali inutili.
+  if (riconnessioniConsecutiveFallite >= MAX_RICONNESSIONI_CONSECUTIVE) {
+    Serial.println("[WiFi] Troppi fallimenti consecutivi, reset completo dello stack WiFi.");
+    mqtt.disconnect();
+    WiFi.disconnect(true);
+    delay(100);
+    bool wifiOk = connectWifiCompleto();
+    bool mqttOk = wifiOk && connectMqtt();
+
+    if (mqttOk) {
+      resetWifiFallitiConsecutivi = 0;
+      return true;
+    }
+
+    resetWifiFallitiConsecutivi++;
+    riconnessioniConsecutiveFallite = 0; // Il prossimo round riparte da zero.
+
+    if (resetWifiFallitiConsecutivi >= MAX_RESET_WIFI_FALLITI_CONSECUTIVI) {
+      // Anche il reset software dello stack WiFi non ha risolto per
+      // troppi round di fila: il radio è probabilmente in uno stato
+      // bloccato che solo un riavvio completo del microcontrollore può
+      // sbloccare (osservato in campo: serviva il pulsante reset
+      // fisico). esp_restart() lo automatizza.
+      Serial.println("[SISTEMA] Reset WiFi ripetuti falliti troppe volte: riavvio completo del microcontrollore.");
+      Serial.flush();
+      delay(200);
+      esp_restart();
+    }
+
+    return false;
+  }
+
+  return false;
+}
+
+// --- Budget di flush ADATTIVO in base a quanto backlog resta da inviare ---
+// In condizioni normali (backlog piccolo o assente) il flush resta breve
+// e a basso consumo. Se il backlog è grande (es. dopo giorni di blackout
+// per un evento meteo estremo che ha tirato giù la linea), il budget si
+// allarga molto per recuperare aggressivamente, sfruttando il fatto che
+// la connessione MQTT è già stabile (niente più costo di handshake ad
+// ogni ciclo con l'architettura a connessione persistente). La lettura
+// live viene SEMPRE inviata prima di questo flush (vedi loop()), quindi
+// allargare questo budget non fa mai perdere un dato live: al massimo
+// allunga quel singolo ciclo, il prossimo campione arriverà con qualche
+// secondo di ritardo ma nessun dato va perso.
+const unsigned long SD_FLUSH_BUDGET_NORMALE_MS   = 600;    // backlog piccolo/assente
+const unsigned long SD_FLUSH_BUDGET_MEDIO_MS     = 3000;   // backlog moderato (minuti/poche ore)
+const unsigned long SD_FLUSH_BUDGET_AGGRESSIVO_MS = 8000;  // backlog enorme (giorni), lascia
+                                                             // comunque margine nel ciclo da 10s
+                                                             // per non bloccare mai del tutto
+const uint32_t SD_SOGLIA_BACKLOG_MEDIO_BYTES      = 50000;   // ~50KB
+const uint32_t SD_SOGLIA_BACKLOG_GRANDE_BYTES     = 500000;  // ~500KB
+
+const unsigned long SD_FLUSH_DELAY_NORMALE_MS = 50;
+const unsigned long SD_FLUSH_DELAY_AGGRESSIVO_MS = 2;
+const int SD_FLUSH_MAX_ROWS_PER_CYCLE_NORMALE = 10;
+
+// Invece di cancellare /backup.jsonl quando risulta "tutto inviato", lo
+// rinomina con un timestamp e ne parte uno nuovo vuoto. Questo è un
+// margine di sicurezza: mqtt.publish() (QoS 0, "fire-and-forget")
+// conferma solo che il pacchetto è stato scritto sulla connessione
+// TCP/TLS, MAI che Mosquitto l'abbia davvero ricevuto o che
+// Telegraf/InfluxDB l'abbiano processato. Durante periodi di rete
+// instabile (DNS/Funnel flaky, come abbiamo visto più volte), è
+// possibile che alcune letture vengano marcate "inviate con successo"
+// lato stazione ma non arrivino mai a destinazione. Con la cancellazione
+// automatica, quei dati sparivano per sempre senza lasciare traccia.
+// Archiviando invece di cancellare, restano sulla SD come rete di
+// sicurezza recuperabile a mano se si notano buchi nei dati su Grafana.
+//
+// NOTA: questo consuma progressivamente più spazio sulla SD nel tempo
+// (i file archiviati non vengono mai cancellati automaticamente) — vale
+// la pena controllare/ripulire manualmente la SD ogni tanto, specie se
+// il backlog recuperato è spesso grande.
+void archiviaBacklogInveceDiCancellare() {
+  String ts = getTimestamp(); // "YYYY-MM-DD HH:MM:SS" o zeri se NTP non disponibile
+  ts.replace(' ', '_');
+  ts.replace(':', '-');
+  String nomeArchivio = "/archivio_" + ts + ".jsonl";
+
+  if (SD.exists(nomeArchivio)) {
+    // Timestamp duplicato (raro, capiterebbe solo se NTP non è mai
+    // sincronizzato e resta sempre "0000-00-00..."): aggiungo un
+    // suffisso basato su millis() per evitare di sovrascrivere un
+    // archivio precedente.
+    nomeArchivio = "/archivio_" + ts + "_" + String(millis()) + ".jsonl";
+  }
+
+  if (SD.rename("/backup.jsonl", nomeArchivio.c_str())) {
+    Serial.println("[SD-RECOVERY] Backlog archiviato come: " + nomeArchivio);
+  } else {
+    // Se anche il rename fallisce per qualche motivo, meglio cancellare
+    // (comportamento precedente) piuttosto che lasciare un offset
+    // disallineato con un file che non si riesce a rinominare.
+    Serial.println("[SD-RECOVERY] Rename archivio fallito, elimino il file.");
+    SD.remove("/backup.jsonl");
+  }
+}
+
+void svuotaCodaSD() {
+  if (!SD.exists("/backup.jsonl")) {
+    sdReadOffset = 0;
+    return;
+  }
+
+  File file = SD.open("/backup.jsonl", FILE_READ);
+  if (!file) {
+    Serial.println("[SD-RECOVERY] Errore critico nell'apertura del file di backup.");
+    return;
+  }
+
+  uint32_t fileSize = file.size();
+  if (sdReadOffset > fileSize) sdReadOffset = 0;
+
+  if (sdReadOffset >= fileSize) {
+    file.close();
+    archiviaBacklogInveceDiCancellare();
+    sdReadOffset = 0;
+    return;
+  }
+
+  uint32_t backlogResiduo = fileSize - sdReadOffset;
+  unsigned long flushBudgetMs;
+  int maxRighePerCiclo;
+  unsigned long flushDelayMs;
+
+  bool inModalitaStabile = (cicloAttualeUs == CICLO_STABILE_US);
+
+  if (inModalitaStabile && backlogResiduo > 0) {
+    // In modalità stabile (30s), qualsiasi backlog residuo — piccolo o
+    // grande — sfrutta il tempo che altrimenti passeremmo semplicemente
+    // ad aspettare senza far nulla di utile. Non ha senso limitare
+    // questo comportamento solo ai backlog enormi: anche pochi KB
+    // rimasti, se recuperati a piccoli bocconi (10 righe/ciclo), possono
+    // impiegare decine di minuti invece di uno o due cicli.
+    const unsigned long SD_FLUSH_MARGINE_MS = 1500; // Tempo lasciato libero per lettura live + overhead del ciclo.
+    unsigned long budgetDisponibile = (unsigned long)(cicloAttualeUs / 1000ULL);
+    budgetDisponibile = (budgetDisponibile > SD_FLUSH_MARGINE_MS) ? (budgetDisponibile - SD_FLUSH_MARGINE_MS) : SD_FLUSH_BUDGET_AGGRESSIVO_MS;
+    flushBudgetMs = (budgetDisponibile > SD_FLUSH_BUDGET_AGGRESSIVO_MS) ? budgetDisponibile : SD_FLUSH_BUDGET_AGGRESSIVO_MS;
+    maxRighePerCiclo = INT32_MAX;
+    flushDelayMs = SD_FLUSH_DELAY_AGGRESSIVO_MS;
+    Serial.printf("[SD-RECOVERY] Modalità stabile con backlog residuo: recupero esteso attivo (budget %lums).\n", flushBudgetMs);
+  } else if (backlogResiduo >= SD_SOGLIA_BACKLOG_GRANDE_BYTES) {
+    // Modalità veloce con backlog enorme: restiamo più cauti (budget
+    // fisso più corto) per non ritardare troppo il prossimo campione,
+    // importante durante un evento meteo in corso.
+    flushBudgetMs = SD_FLUSH_BUDGET_AGGRESSIVO_MS;
+    maxRighePerCiclo = INT32_MAX;
+    flushDelayMs = SD_FLUSH_DELAY_AGGRESSIVO_MS;
+  } else if (backlogResiduo >= SD_SOGLIA_BACKLOG_MEDIO_BYTES) {
+    flushBudgetMs = SD_FLUSH_BUDGET_MEDIO_MS;
+    maxRighePerCiclo = INT32_MAX;
+    flushDelayMs = SD_FLUSH_DELAY_AGGRESSIVO_MS;
+  } else {
+    flushBudgetMs = SD_FLUSH_BUDGET_NORMALE_MS;
+    maxRighePerCiclo = SD_FLUSH_MAX_ROWS_PER_CYCLE_NORMALE;
+    flushDelayMs = SD_FLUSH_DELAY_NORMALE_MS;
+  }
+
+  Serial.printf("[SD-RECOVERY] Riprendo l'invio da offset %u/%u byte...\n", sdReadOffset, fileSize);
+
+  file.seek(sdReadOffset);
+
+  char topic[64];
+  snprintf(topic, sizeof(topic), "station/%s/base", STATION_ID);
+
+  unsigned long flushStart = millis();
+  int righeInviate = 0;
+
+  while (file.available()) {
+    esp_task_wdt_reset();
+    if ((millis() - flushStart) >= flushBudgetMs) {
+      break;
+    }
+    if (righeInviate >= maxRighePerCiclo) {
+      break;
+    }
+
+    // Buffer fisso invece di String: readStringUntil() alloca un nuovo
+    // oggetto String (heap) ad ogni riga letta. Con centinaia di righe
+    // per ciclo in modalità di recupero backlog, questo può frammentare
+    // l'heap nel tempo. Un buffer statico riutilizzato evita del tutto
+    // queste allocazioni/deallocazioni ripetute.
+    static char rigaBuf[300];
+    size_t rigaLen = file.readBytesUntil('\n', rigaBuf, sizeof(rigaBuf) - 1);
+    rigaBuf[rigaLen] = '\0';
+
+    // Trim manuale di eventuali spazi/CR finali (equivalente a .trim()).
+    while (rigaLen > 0 && (rigaBuf[rigaLen - 1] == '\r' || rigaBuf[rigaLen - 1] == ' ' || rigaBuf[rigaLen - 1] == '\n')) {
+      rigaBuf[--rigaLen] = '\0';
+    }
+
+    if (rigaLen == 0) {
+      sdReadOffset = file.position();
+      continue;
+    }
+
+    if (mqtt.connected() && mqtt.publish(topic, rigaBuf)) {
+      righeInviate++;
+      sdReadOffset = file.position();
+      delay(flushDelayMs);
+      continue;
+    }
+
+    Serial.println("[SD-RECOVERY] Invio fallito, mi fermo qui per questo ciclo.");
+    break;
+  }
+
+  file.close();
+
+  if (sdReadOffset >= fileSize) {
+    archiviaBacklogInveceDiCancellare();
+    sdReadOffset = 0;
+    Serial.printf("[SD-RECOVERY] Lotto inviato: %d righe. Coda SD svuotata (archiviata, non cancellata).\n", righeInviate);
+    return;
+  }
+
+  Serial.printf("[SD-RECOVERY] Lotto inviato: %d righe. Offset a %u/%u byte.\n",
+                righeInviate, sdReadOffset, fileSize);
+
+  if (sdReadOffset >= SD_COMPACT_THRESHOLD_BYTES) {
+    Serial.println("[SD-RECOVERY] Compattazione file di backup in corso...");
+
+    File src = SD.open("/backup.jsonl", FILE_READ);
+    if (!src) return;
+    src.seek(sdReadOffset);
+
+    if (SD.exists("/backup.tmp")) SD.remove("/backup.tmp");
+    File dst = SD.open("/backup.tmp", FILE_WRITE);
+    if (!dst) { src.close(); return; }
+
+    static uint8_t buf[4096];
+    int n;
+    while ((n = src.read(buf, sizeof(buf))) > 0) {
+      esp_task_wdt_reset(); // Con file molto grandi (decine di MB) la
+                             // copia può richiedere più del timeout del
+                             // watchdog se non lo nutriamo qui dentro.
+      dst.write(buf, n);
+    }
+    src.close();
+    dst.close();
+
+    SD.remove("/backup.jsonl");
+    SD.rename("/backup.tmp", "/backup.jsonl");
+    sdReadOffset = 0;
+    Serial.println("[SD-RECOVERY] Compattazione completata.");
+  }
+}
+
+void scriviSuSD(String payload) {
+  File file = SD.open("/backup.jsonl", FILE_APPEND);
+  if (!file) {
+    Serial.println("[SD-ERROR] Impossibile scrivere sulla scheda MicroSD!");
+    return;
+  }
+  file.println(payload);
+  file.close();
+  Serial.println("[SD-STORE] Dati salvati localmente su SD: " + payload);
+}
+
+void handleDataCycle(bool mqttReady) {
+  bmp5_sensor_data bmpData;
+  bmp580.getSensorData(&bmpData);
+  float real_temp  = bmpData.temperature;
+  float real_press = bmpData.pressure / 100.0F;
+
+  valutaCampionamentoAdattivo(real_temp, real_press);
+
+  sensors_event_t humidity, temp;
+  sht4.getEvent(&humidity, &temp);
+  float h = humidity.relative_humidity;
+  float vemlLux = veml7700.readLux();
+  float mcpTemp = mcp9808.readTempC();
+  int as3935Intr = as3935.readInterruptReg();
+
+  float wind     = 0.0;
+  float wind_dir = 0.0;
+  float rain     = 0.0;
+
+  JsonDocument doc;
+  doc["station_id"]          = STATION_ID;
+  doc["timestamp"]           = getTimestamp();
+  doc["temperature"]         = real_temp;
+  doc["temperature_mcp9808"] = mcpTemp;
+  doc["temperature_sht45"]   = temp.temperature;
+  doc["humidity"]            = h;
+  doc["pressure"]            = real_press;
+  doc["lux"]                 = vemlLux;
+  doc["as3935_interrupt"]    = as3935Intr;
+  doc["wind_speed"]          = wind;
+  doc["wind_direction"]      = wind_dir;
+  doc["rain_mm"]             = rain;
+
+  char payload[384];
+  serializeJson(doc, payload);
+
+  if (mqttReady && mqtt.connected()) {
+    char topic[64];
+    snprintf(topic, sizeof(topic), "station/%s/base", STATION_ID);
+    if (mqtt.publish(topic, payload)) {
+      Serial.println("[MQTT] Inviato: " + String(payload));
+      return;
+    }
+  }
+
+  scriviSuSD(String(payload));
+}
+
+// Attesa fino al prossimo ciclo SENZA sospendere la CPU (niente
+// esp_light_sleep_start()). Il risparmio energetico arriva solo dal
+// power-save del radio WiFi (WIFI_PS_MIN_MODEM, impostato una volta in
+// connectWifiCompleto): il radio si "congela" tra un beacon e l'altro,
+// ma la CPU resta sveglia e continua a servire lo stack TCP/IP e
+// mqtt.loop() regolarmente. Questo evita il problema di sincronizzazione
+// radio osservato con il light sleep esplicito (disassociazioni cicliche
+// e socket "zombie"), al costo di un consumo medio più alto.
+// Vero light sleep: a differenza del modem sleep (CPU sempre sveglia,
+// radio in power-save), qui il WiFi viene fermato completamente e la
+// CPU stessa viene sospesa con esp_light_sleep_start(). Questo è il
+// pattern confermato funzionante da diversi utenti ESP32 con lo stesso
+// problema di instabilità che avevamo osservato tenendo il WiFi
+// associato durante il sonno: la differenza chiave è che qui NON si
+// tenta di mantenere l'associazione WiFi attraverso il sonno — viene
+// smontata pulitamente prima e ricostruita da zero al risveglio (vedi
+// loop(), che richiama connectWifiCompleto()+connectMqtt() ad ogni
+// ciclo, esattamente come se fosse un riavvio).
+void vaiInLightSleepReale(unsigned long cycleStartMillis, bool connessioneRiuscita) {
+  // Se la connessione è fallita in questo ciclo, ritentiamo velocemente
+  // (come in modalità veloce) INDIPENDENTEMENTE dalla modalità meteo:
+  // un problema di rete/DNS va ritentato spesso, non ha senso aspettare
+  // fino a 60s solo perché il meteo è stabile. La modalità meteo governa
+  // la cadenza di CAMPIONAMENTO quando la connessione funziona, non la
+  // cadenza di RETRY quando è caduta.
+  uint64_t cicloEffettivoUs = connessioneRiuscita ? cicloAttualeUs : CICLO_VELOCE_US;
+
+  unsigned long elapsedMs = millis() - cycleStartMillis;
+  long sleepMs = (long)(cicloEffettivoUs / 1000ULL) - (long)elapsedMs;
+  const long SLEEP_MINIMO_MS = 500;
+  if (sleepMs < SLEEP_MINIMO_MS) sleepMs = SLEEP_MINIMO_MS;
+
+  Serial.printf("[SLEEP] Ciclo attivo: %lums. Light sleep reale per %ldms. [Modalità: %s%s]\n",
+                elapsedMs, sleepMs,
+                (cicloAttualeUs == CICLO_VELOCE_US) ? "VELOCE 10s" : "stabile 30s",
+                connessioneRiuscita ? "" : " - RETRY RAPIDO per connessione fallita");
+
+  // Disconnessione pulita PRIMA del sonno: chiudiamo MQTT, disconnettiamo
+  // il WiFi mantenendo la configurazione (SSID/password) per un
+  // riaggancio più rapido, poi fermiamo del tutto il driver radio.
+  if (mqtt.connected()) mqtt.disconnect();
+  WiFi.disconnect(false);
+  delay(100);
+  esp_wifi_stop();
+  delay(50);
+
+  Serial.flush();
+
+  esp_sleep_enable_timer_wakeup((uint64_t)sleepMs * 1000ULL);
+  esp_light_sleep_start();
+
+  // Al risveglio riavviamo lo stack radio: la vera riconnessione WiFi
+  // (WiFi.begin()) avviene nel prossimo giro di loop() tramite
+  // connectWifiCompleto(), qui serve solo a rimettere in piedi il
+  // driver che avevamo fermato con esp_wifi_stop().
+  esp_wifi_start();
+  delay(50);
+}
+
 void setup() {
   Serial.begin(115200);
-  delay(1500);
-  Serial.println("\n--- LegmaMiteo: BMP580 + SHT45 + VEML7700 + MCP9808 Test I2C ---");
+  delay(100);
 
-  // Inizializzazione bus I2C
+  // Task watchdog: se loop() smette di "nutrirlo" per più di
+  // WATCHDOG_TIMEOUT_SEC (bug imprevisto, exception, deadlock su I2C/SPI/
+  // rete), l'ESP32 si riavvia da solo automaticamente — equivalente
+  // software del pulsante reset fisico.
+  // API legacy del watchdog (compatibile con core Arduino-ESP32 senza
+  // la struct esp_task_wdt_config_t, introdotta solo in versioni più
+  // recenti del core/ESP-IDF): timeout in secondi + flag di panic.
+  esp_task_wdt_init(WATCHDOG_TIMEOUT_SEC, true);
+  esp_task_wdt_add(NULL); // Registra il task corrente (loop principale).
+
+  Serial.println("\n--- LegmaMiteo: avvio con architettura light sleep + connessione persistente ---");
+
+  rgbLed.begin();
+  rgbLed.setBrightness(40);
+
+  configTime(GMT_OFFSET_SEC, DAYLIGHT_OFFSET_SEC, NTP_SERVER, "pool.ntp.org", "time.cloudflare.com");
+
   Wire.begin(I2C_SDA, I2C_SCL);
-  Wire.setClock(100000); // 100 kHz per la massima stabilità
+  Wire.setClock(100000);
   delay(200);
 
-  // --- 1. Inizializzazione BMP580 (Indirizzo 0x46) ---
   int8_t bmpErr = bmp580.beginI2C(0x46);
-  if (bmpErr == BMP5_OK) {
-    Serial.println("[BMP580] Inizializzazione I2C riuscita (0x46)!");
+  if (bmpErr == BMP5_OK) Serial.println("[BMP580] Inizializzazione I2C riuscita (0x46)!");
+  else Serial.printf("[BMP580] ERRORE di inizializzazione. Codice: %d\n", bmpErr);
+
+  if (sht4.begin(&Wire)) { sht4.setPrecision(SHT4X_HIGH_PRECISION); sht4.setHeater(SHT4X_NO_HEATER); Serial.println("[SHT45] Riuscita (0x44)!"); }
+  else Serial.println("[SHT45] FALLITA!");
+
+  if (veml7700.begin()) Serial.println("[VEML7700] Riuscita (0x10)!");
+  else Serial.println("[VEML7700] FALLITA!");
+
+  if (mcp9808.begin(0x18)) { mcp9808.setResolution(3); Serial.println("[MCP9808] Riuscita (0x18)!"); }
+  else Serial.println("[MCP9808] FALLITA!");
+
+  SPI.begin(SPI_CLK, SPI_MISO, SPI_MOSI, chipSelect);
+  Serial.print("[HARDWARE] Inizializzazione modulo SD... ");
+  if (!SD.begin(chipSelect)) {
+    Serial.println("FALLITA! Controlla pin, contatti o formattazione FAT32.");
   } else {
-    Serial.printf("[BMP580] ERRORE di inizializzazione. Codice: %d\n", bmpErr);
+    Serial.println("OK, MicroSD rilevata.");
   }
 
-  // --- 2. Inizializzazione SHT45 (Indirizzo nativo 0x44) ---
-  Serial.print("[SHT45] Inizializzazione... ");
-  if (sht4.begin(&Wire)) {
-    Serial.println("Riuscita (0x44)!");
-    sht4.setPrecision(SHT4X_HIGH_PRECISION);
-    sht4.setHeater(SHT4X_NO_HEATER);
-  } else {
-    Serial.println("FALLITA!");
-  }
-
-  // --- 3. Inizializzazione VEML7700 (Indirizzo nativo 0x10) ---
-  Serial.print("[VEML7700] Inizializzazione... ");
-  if (veml7700.begin()) {
-    Serial.println("Riuscita (0x10)!");
-  } else {
-    Serial.println("FALLITA!");
-  }
-
-  // --- 4. Inizializzazione MCP9808 (Indirizzo 0x18 con A0/A1/A2 a GND) ---
-  Serial.print("[MCP9808] Inizializzazione... ");
-  if (mcp9808.begin(0x18)) {
-    mcp9808.setResolution(3); // massima risoluzione, 0.0625°C
-    Serial.println("Riuscita (0x18)!");
-  } else {
-    Serial.println("FALLITA!");
-  }
-
-  // --- 5. Inizializzazione AS3935 su SPI condiviso ---
-  SPI.begin(SPI_SCK, SPI_MISO, SPI_MOSI, AS3935_CS);
-  pinMode(AS3935_CS, OUTPUT);
-  digitalWrite(AS3935_CS, HIGH);
-  delay(100);
   if (as3935.beginSPI(AS3935_CS, 1000000, SPI)) {
     as3935.setIndoorOutdoor(INDOOR);
     as3935.setNoiseLevel(2);
@@ -87,77 +869,72 @@ void setup() {
     Serial.println("[AS3935] FALLITA!");
   }
 
-  // --- 6. Test MicroSD sullo stesso bus SPI dell'AS3935 ---
-  Serial.print("[SD] Inizializzazione... ");
-  if (!SD.begin(SD_CS)) {
-    Serial.println("FALLITA! Controlla CS GPIO18, contatti o formattazione FAT32.");
-  } else {
-    Serial.println("OK, MicroSD rilevata.");
+  mqtt.setServer(MQTT_HOST, MQTT_PORT);
+  mqtt.setBufferSize(512);
+  mqtt.setSocketTimeout(10);
+  // Keepalive più corto del default (15s invece di 60s): utile a
+  // rilevare rapidamente un socket morto durante il breve periodo di
+  // attività di ogni ciclo.
+  mqtt.setKeepAlive(15);
 
-    File f = SD.open("/test_miteo.txt", FILE_WRITE);
-    if (f) {
-      f.println("Test SD Miteo");
-      f.close();
-      Serial.println("[SD] Scrittura test OK.");
-    } else {
-      Serial.println("[SD] Errore scrittura test.");
-    }
-
-    File r = SD.open("/test_miteo.txt", FILE_READ);
-    if (r) {
-      Serial.print("[SD] Contenuto test: ");
-      while (r.available()) Serial.write(r.read());
-      r.close();
-    }
-  }
-
-  Serial.println("--- Setup completato. Avvio letture ---\n");
+  // IMPORTANTE: con l'architettura a light sleep reale, la connessione
+  // WiFi/MQTT NON viene stabilita qui in setup(). Ogni singolo ciclo di
+  // loop() si connette da zero (vedi sopra) e si disconnette
+  // completamente prima di dormire (vedi vaiInLightSleepReale()). Se
+  // setup() si connettesse già qui, il primo giro di loop() ritenterebbe
+  // una seconda connessione sopra una sessione WiFi/TLS non ancora
+  // smontata, causando conflitti di stato (osservato in test: errori
+  // SSL anomali e blocchi). Lasciamo quindi che sia il primo loop() a
+  // occuparsene, con un WiFi/MQTT puliti fin dall'inizio.
 }
 
 void loop() {
-  Serial.println("----------------------------------------");
+  esp_task_wdt_reset(); // "Nutre" il watchdog: conferma che il loop non è bloccato.
 
-  // --- Lettura BMP580 (Pressione e Temperatura) ---
-  bmp5_sensor_data bmpData;
-  int8_t readErr = bmp580.getSensorData(&bmpData);
+  unsigned long cycleStart = millis();
 
-  if (readErr == BMP5_OK) {
-    Serial.printf("[BMP580] Pressione: %.2f hPa | Temp: %.2f °C\n",
-                  bmpData.pressure / 100.0f, bmpData.temperature);
-  } else {
-    Serial.printf("[BMP580] Errore lettura dati. Codice: %d\n", readErr);
+  // A differenza della versione modem sleep (connessione persistente,
+  // assicuraConnessioneAttiva() fa solo un controllo leggero), qui il
+  // WiFi è stato smontato completamente prima del sonno precedente:
+  // ogni ciclo riparte da una connessione fresca, esattamente come un
+  // mini-riavvio. Il reset completo dello stack WiFi dopo troppi
+  // fallimenti resta comunque come rete di sicurezza tramite lo stesso
+  // meccanismo di connectWifiCompleto() (che azzera il contatore dei
+  // fallimenti quando riesce).
+  bool wifiOk = connectWifiCompleto();
+  bool mqttOk = wifiOk && connectMqtt();
+
+  if (!wifiOk) {
+    riconnessioniConsecutiveFallite++;
+  } else if (!mqttOk) {
+    Serial.println("[MQTT] Broker non raggiungibile in questo ciclo.");
+    mostraMqttNonRaggiungibile();
+    riconnessioniConsecutiveFallite++;
   }
 
-  // --- Lettura SHT45 (Umidità e Temperatura) ---
-  sensors_event_t humidity, temp;
-  if (sht4.getEvent(&humidity, &temp)) {
-    Serial.printf("[SHT45]  Umidità:  %.2f %%  | Temp: %.2f °C\n",
-                  humidity.relative_humidity, temp.temperature);
-  } else {
-    Serial.println("[SHT45]  Errore lettura dati.");
+  // Stesso meccanismo di escalation della versione modem sleep: troppi
+  // cicli falliti di fila -> riavvio completo del microcontrollore
+  // (vedi discussione precedente sul caso del LED viola risolto solo
+  // dal pulsante reset fisico).
+  if (riconnessioniConsecutiveFallite >= MAX_RICONNESSIONI_CONSECUTIVE) {
+    resetWifiFallitiConsecutivi++;
+    riconnessioniConsecutiveFallite = 0;
+    if (resetWifiFallitiConsecutivi >= MAX_RESET_WIFI_FALLITI_CONSECUTIVI) {
+      Serial.println("[SISTEMA] Troppi cicli falliti consecutivi: riavvio completo del microcontrollore.");
+      Serial.flush();
+      delay(200);
+      esp_restart();
+    }
+  } else if (mqttOk) {
+    resetWifiFallitiConsecutivi = 0;
+    riconnessioniConsecutiveFallite = 0; // Reset corretto: solo su successo COMPLETO del ciclo.
   }
 
-  // --- Lettura VEML7700 (Luminosità) ---
-  Serial.printf("[VEML7700] Lux: %.2f\n", veml7700.readLux());
+  if (mqtt.connected()) mqtt.loop();
 
-  // --- Lettura MCP9808 (Temperatura) ---
-  Serial.printf("[MCP9808] Temp: %.2f °C\n", mcp9808.readTempC());
+  handleDataCycle(mqttOk);
 
-  // --- Lettura AS3935 (interrupt fulmini) ---
-  int intr = as3935.readInterruptReg();
-  if (intr == 1) Serial.println("[AS3935] Rilevato disturbo/noise");
-  else if (intr == 4) Serial.println("[AS3935] Disturber rilevato");
-  else if (intr == 8) Serial.println("[AS3935] FULMINE rilevato!");
+  if (mqttOk) svuotaCodaSD();
 
-  // --- Test scrittura SD sul bus condiviso ---
-  File logFile = SD.open("/log_test.txt", FILE_APPEND);
-  if (logFile) {
-    logFile.printf("millis=%lu\n", millis());
-    logFile.close();
-    Serial.println("[SD] Scrittura log OK.");
-  } else {
-    Serial.println("[SD] Errore scrittura log.");
-  }
-
-  delay(2000);
+  vaiInLightSleepReale(cycleStart, mqttOk);
 }
