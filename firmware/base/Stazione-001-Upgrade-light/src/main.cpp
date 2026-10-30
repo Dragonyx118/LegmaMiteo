@@ -1,6 +1,7 @@
 #include <Arduino.h>
 #include <Wire.h>
 #include <SPI.h>
+#include <SD.h>
 #include <SparkFun_BMP581_Arduino_Library.h>
 #include <Adafruit_SHT4x.h>
 #include <Adafruit_VEML7700.h>
@@ -17,13 +18,14 @@ const int SPI_MISO = 16;
 const int SPI_MOSI = 15;
 const int AS3935_CS = 9;
 const int AS3935_IRQ = 7;
+const int SD_CS = 18;
 
 // Oggetti sensori
 BMP581 bmp580;
 Adafruit_SHT4x sht4;
 Adafruit_VEML7700 veml7700 = Adafruit_VEML7700();
 Adafruit_MCP9808 mcp9808 = Adafruit_MCP9808();
-SparkFun_AS3935 as3935(AS3935_CS, AS3935_IRQ);
+SparkFun_AS3935 as3935;
 
 void setup() {
   Serial.begin(115200);
@@ -75,14 +77,38 @@ void setup() {
   pinMode(AS3935_CS, OUTPUT);
   digitalWrite(AS3935_CS, HIGH);
   delay(100);
-  if (as3935.beginSPI()) {
+  if (as3935.beginSPI(AS3935_CS, 1000000, SPI)) {
     as3935.setIndoorOutdoor(INDOOR);
     as3935.setNoiseLevel(2);
-    as3935.setWatchdogThreshold(2);
-    as3935.setSpikeRejection(2);
+    as3935.watchdogThreshold(2);
+    as3935.spikeRejection(2);
     Serial.println("[AS3935] Inizializzazione SPI riuscita!");
   } else {
     Serial.println("[AS3935] FALLITA!");
+  }
+
+  // --- 6. Test MicroSD sullo stesso bus SPI dell'AS3935 ---
+  Serial.print("[SD] Inizializzazione... ");
+  if (!SD.begin(SD_CS)) {
+    Serial.println("FALLITA! Controlla CS GPIO18, contatti o formattazione FAT32.");
+  } else {
+    Serial.println("OK, MicroSD rilevata.");
+
+    File f = SD.open("/test_miteo.txt", FILE_WRITE);
+    if (f) {
+      f.println("Test SD Miteo");
+      f.close();
+      Serial.println("[SD] Scrittura test OK.");
+    } else {
+      Serial.println("[SD] Errore scrittura test.");
+    }
+
+    File r = SD.open("/test_miteo.txt", FILE_READ);
+    if (r) {
+      Serial.print("[SD] Contenuto test: ");
+      while (r.available()) Serial.write(r.read());
+      r.close();
+    }
   }
 
   Serial.println("--- Setup completato. Avvio letture ---\n");
@@ -122,6 +148,16 @@ void loop() {
   if (intr == 1) Serial.println("[AS3935] Rilevato disturbo/noise");
   else if (intr == 4) Serial.println("[AS3935] Disturber rilevato");
   else if (intr == 8) Serial.println("[AS3935] FULMINE rilevato!");
+
+  // --- Test scrittura SD sul bus condiviso ---
+  File logFile = SD.open("/log_test.txt", FILE_APPEND);
+  if (logFile) {
+    logFile.printf("millis=%lu\n", millis());
+    logFile.close();
+    Serial.println("[SD] Scrittura log OK.");
+  } else {
+    Serial.println("[SD] Errore scrittura log.");
+  }
 
   delay(2000);
 }
