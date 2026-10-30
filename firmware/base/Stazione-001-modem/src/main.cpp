@@ -59,7 +59,7 @@ bool ssidVisibileInAria(const char* ssidCercato) {
 
 const char* NTP_SERVER    = "time.google.com";
 const long  GMT_OFFSET_SEC = 3600;
-const int   DAYLIGHT_OFFSET_SEC = 3600;
+const int   DAYLIGHT_OFFSET_SEC = 0;    // Winter: DST OFF (UTC+1)
 
 const char* TIME_API_URL = "https://timeapi.io/api/time/current/zone?timeZone=Europe/Rome";
 
@@ -242,7 +242,7 @@ bool syncTimeViaHttp() {
 }
 
 void trySyncTime() {
-  configTime(GMT_OFFSET_SEC, DAYLIGHT_OFFSET_SEC, NTP_SERVER, "pool.ntp.org", "time.cloudflare.com");
+  configTime(3600, 0, NTP_SERVER, "pool.ntp.org", "time.cloudflare.com");
 
   if (timeSynchronized) return;
   if (WiFi.status() != WL_CONNECTED) return;
@@ -705,7 +705,7 @@ void setup() {
   rgbLed.begin();
   rgbLed.setBrightness(40);
 
-  configTime(GMT_OFFSET_SEC, DAYLIGHT_OFFSET_SEC, NTP_SERVER, "pool.ntp.org", "time.cloudflare.com");
+  configTime(3600, 0, NTP_SERVER, "pool.ntp.org", "time.cloudflare.com");
 
   Wire.begin(I2C_SDA, I2C_SCL);
   if (!bmp.begin()) {

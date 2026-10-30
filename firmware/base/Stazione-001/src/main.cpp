@@ -73,7 +73,7 @@
 // Server NTP per l'orario esatto
 const char* NTP_SERVER    = "time.google.com";
 const long  GMT_OFFSET_SEC = 3600;        // Italia: UTC+1
-const int   DAYLIGHT_OFFSET_SEC = 3600;   // Ora legale attivata
+const int   DAYLIGHT_OFFSET_SEC = 0;    // Winter: DST OFF (UTC+1)
 
 // Fallback HTTP per l'orario, usato solo se NTP fallisce (vedi sopra)
 const char* TIME_API_URL = "https://timeapi.io/api/time/current/zone?timeZone=Europe/Rome";
@@ -188,7 +188,7 @@ void trySyncTime() {
   // timeSynchronized già true dalla RTC memory) l'offset non veniva mai
   // più impostato in quel boot, e getLocalTime() restituiva un orario
   // sfasato (mancava l'ora legale, -2h rispetto al corretto).
-  configTime(GMT_OFFSET_SEC, DAYLIGHT_OFFSET_SEC, NTP_SERVER, "pool.ntp.org", "time.cloudflare.com");
+  configTime(3600, 0, NTP_SERVER, "pool.ntp.org", "time.cloudflare.com");
 
   if (timeSynchronized) return; // Offset impostato, RTC del chip già
                                  // corretta dal boot precedente: non
@@ -451,7 +451,7 @@ void setup() {
   // l'epoch UTC corretto, ma senza offset il timestamp risultava sfasato
   // di 2 ore (l'esatta differenza GMT+DST osservata nei dati salvati su
   // SD durante le interruzioni di rete).
-  configTime(GMT_OFFSET_SEC, DAYLIGHT_OFFSET_SEC, NTP_SERVER, "pool.ntp.org", "time.cloudflare.com");
+  configTime(3600, 0, NTP_SERVER, "pool.ntp.org", "time.cloudflare.com");
 
   if (!bmp.begin()) {
     Serial.println("[HARDWARE] BMP180 non rilevato!");

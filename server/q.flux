@@ -1,0 +1,1 @@
+from(bucket: "stations") |> range(start: -1h) |> last()
