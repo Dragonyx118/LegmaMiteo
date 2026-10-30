@@ -9,63 +9,60 @@ AS3935 no resistenze per I2C
 
 Parallelo pull-up effettivo: SDA ≈ 2.7kOhm, SCL ≈ 4.2kOhm (BMP580 + SHT45; gli altri non contribuiscono)
 
-=== BUS I2C CONDIVISO (SDA=GPIO4, SCL=GPIO5) ===
-
-BMP580 (pressione):
-  SCL   -> GPIO17 (CLK)
-  SDA   -> GPIO15 (MOSI)
-  CS    -> GPIO9  (CS dedicato per SPI)
-  SDO   -> GPIO16 (MISO)
-  INT   -> non collegato (polling, non serve)
-  VCC   -> 3.3V
-  GND   -> GND
+=== BUS I2C PRINCIPALE (SDA=GPIO4, SCL=GPIO5) ===
+(Solo sensori ambientali stabili: SHT45, MCP9808, VEML7700)
 
 SHT45 (umidità):
   SCL   -> GPIO5
   SDA   -> GPIO4
   VCC   -> 3.3V
   GND   -> GND
-  (indirizzo fisso 0x44, nessun pin di selezione)
+  (indirizzo fisso 0x44)
 
 VEML7700 (luce):
   SCL   -> GPIO5
   SDA   -> GPIO4
-  3Vo   -> non collegato (è un'uscita del regolatore interno, non un ingresso)
   VCC   -> 3.3V
   GND   -> GND
-  (indirizzo fisso 0x10, nessun pin di selezione)
+  (indirizzo fisso 0x10)
 
 MCP9808 (temperatura):
   SCL   -> GPIO5
   SDA   -> GPIO4
-  A0    -> GND
-  A1    -> GND
-  A2    -> GND    (indirizzo 0x18 con tutti a GND)
-  ALERT -> non collegato (opzionale, serve solo per interrupt su soglia temperatura)
+  A0,A1,A2 -> GND (indirizzo 0x18)
   VCC   -> 3.3V
   GND   -> GND
 
+=== BUS SPI CONDIVISO (SCK=GPIO17, MISO=GPIO16, MOSI=GPIO15) ===
+
+BMP580 (pressione):
+  SCK   -> GPIO17
+  MISO  -> GPIO16
+  MOSI  -> GPIO15
+  CS    -> GPIO9  (CS dedicato)
+  VCC   -> 3.3V
+  GND   -> GND
+
+Scheda MicroSD:
+  SCK   -> GPIO17
+  MISO  -> GPIO16
+  MOSI  -> GPIO15
+  CS    -> GPIO18 (CS dedicato)
+  VCC   -> 3.3V
+  GND   -> GND
+
+=== BUS SPI SEPARATO (FSPI) ===
+
 AS3935 (fulmini):
-  SCL      -> 12 (CLK)
-  MOSI     -> 11
-  MISO     -> 13
-  CS       -> 3.3V    (disattiva modalità SPI)
-  SI       -> 3.3V    (seleziona modalità I2C: SI=GND sarebbe SPI)
-  A0 (I0)  -> GND
-  A1       -> GND     (indirizzo 0x03 con entrambi a GND)
-  EN-VREG  -> 3.3V    (abilita regolatore interno, obbligatorio)
-  IRQ      -> GPIO6   (interrupt dedicato, da gestire via attachInterrupt — evento raro/imprevedibile, non va a polling)
-  VCC      -> 3.3V
-  GND      -> GND
-
-=== SCHEDA MicroSD (SPI dedicato, già presente nel firmware) ===
-
-  MISO (SPI_MISO)  -> GPIO16
-  CLK  (SPI_CLK)   -> GPIO17
-  MOSI (SPI_MOSI)  -> GPIO15
-  CS   (chipSelect) -> GPIO18
-  VCC              -> 3.3V
-  GND              -> GND
+  SCK   -> GPIO12
+  MISO  -> GPIO13
+  MOSI  -> GPIO11
+  CS    -> GPIO10
+  SI    -> GND     (fissa modalità SPI)
+  IRQ   -> GPIO6  (interrupt)
+  EN-VREG -> 3.3V
+  VCC   -> 3.3V
+  GND   -> GND
 
 === ALTRO ===
 
@@ -73,20 +70,16 @@ RGB LED (stato connessione) -> GPIO48
 
 === RIEPILOGO GPIO OCCUPATI ===
 
-GPIO4  -> I2C SDA (BMP580, SHT45, VEML7700, MCP9808, AS3935/MOSI)
-GPIO5  -> I2C SCL (BMP580, SHT45, VEML7700, MCP9808, AS3935)
+GPIO4  -> I2C SDA
+GPIO5  -> I2C SCL
 GPIO6  -> AS3935 IRQ
-GPIO15 -> SD SPI MOSI
-GPIO16 -> SD SPI MISO
-GPIO17 -> SD SPI CLK
-GPIO18 -> SD SPI CS
+GPIO9  -> BMP580 CS
+GPIO10 -> AS3935 CS
+GPIO11 -> AS3935 MOSI
+GPIO12 -> AS3935 SCK
+GPIO13 -> AS3935 MISO
+GPIO15 -> SPI MOSI (SD, BMP580)
+GPIO16 -> SPI MISO (SD, BMP580)
+GPIO17 -> SPI SCK  (SD, BMP580)
+GPIO18 -> SD CS
 GPIO48 -> RGB LED
-
-Nessuna collisione tra bus I2C, SPI SD e IRQ fulmini.
-
-=== RIMOZIONE SENSORE ATTUALE ===
-
-BMP180/Adafruit_BMP085 (sensore in uso nel firmware attuale) -> scollegare da SDA/SCL,
-rimuovere dal codice: #include <Adafruit_BMP085.h>, oggetto bmp, bmp.begin(),
-bmp.readTemperature()/bmp.readPressure() in handleDataCycle()
--> sostituire con letture da MCP9808 (temperatura) e BMP580 (pressione)
