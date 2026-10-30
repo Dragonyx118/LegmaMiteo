@@ -24,6 +24,7 @@ VEML7700 (luce):
   SDA   -> GPIO4
   VCC   -> 3.3V
   GND   -> GND
+  3Vo   -> NC
   (indirizzo fisso 0x10)
 
 MCP9808 (temperatura):
@@ -32,14 +33,15 @@ MCP9808 (temperatura):
   A0,A1,A2 -> GND (indirizzo 0x18)
   VCC   -> 3.3V
   GND   -> GND
+  ALERT -> NC
 
 === BUS SPI CONDIVISO (SCK=GPIO17, MISO=GPIO16, MOSI=GPIO15) ===
 
 BMP580 (pressione):
-  SCK   -> GPIO17
-  MISO  -> GPIO16
-  MOSI  -> GPIO15
-  CS    -> GPIO9  (CS dedicato)
+  SCL   -> GPIO5
+  SDA   -> GPIO6
+  SDO   -> 
+  INT   -> NC
   VCC   -> 3.3V
   GND   -> GND
 
@@ -51,16 +53,16 @@ Scheda MicroSD:
   VCC   -> 3.3V
   GND   -> GND
 
-=== BUS SPI SEPARATO (FSPI) ===
-
-AS3935 (fulmini):
-  SCK   -> GPIO12
-  MISO  -> GPIO13
-  MOSI  -> GPIO11
-  CS    -> GPIO10
+AS3935 (fulmini) - sullo stesso bus fisico della SD:
+  SCK   -> GPIO17
+  MOSI  -> GPIO15
+  MISO  -> GPIO16
+  CS    -> GPIO9 (dedicato)
   SI    -> GND     (fissa modalità SPI)
-  IRQ   -> GPIO6  (interrupt)
+  A0    -> GND
+  A1    -> GND
   EN-VREG -> 3.3V
+  IRQ   -> GPIO7 (interrupt rilevamento)
   VCC   -> 3.3V
   GND   -> GND
 
@@ -72,14 +74,10 @@ RGB LED (stato connessione) -> GPIO48
 
 GPIO4  -> I2C SDA
 GPIO5  -> I2C SCL
-GPIO6  -> AS3935 IRQ
-GPIO9  -> BMP580 CS
-GPIO10 -> AS3935 CS
-GPIO11 -> AS3935 MOSI
-GPIO12 -> AS3935 SCK
-GPIO13 -> AS3935 MISO
-GPIO15 -> SPI MOSI (SD, BMP580)
-GPIO16 -> SPI MISO (SD, BMP580)
-GPIO17 -> SPI SCK  (SD, BMP580)
+GPIO7  -> AS3935 IRQ
+GPIO9  -> AS3935 CS
+GPIO15 -> SPI MOSI (SD, BMP580, AS3935)
+GPIO16 -> SPI MISO (SD, BMP580, AS3935)
+GPIO17 -> SPI SCK  (SD, BMP580, AS3935)
 GPIO18 -> SD CS
 GPIO48 -> RGB LED
