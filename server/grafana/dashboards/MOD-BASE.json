@@ -89,7 +89,7 @@
             "type": "influxdb",
             "uid": "afrpmft5s97uod"
           },
-          "query": "from(bucket: \"stations\")\n  |> range(start: -5m)\n  |> filter(fn: (r) => r._measurement == \"weather_station\" and r._field == \"temperature\")\n  |> filter(fn: (r) => r.station_id =~ /^${station:regex}$/)\n  |> group()\n  |> distinct(column: \"station_id\")\n  |> count()",
+          "query": "from(bucket: \"stations\")\n  |> range(start: -5m)\n  |> filter(fn: (r) => r._measurement == \"weather_station\" and r._field == \"temperature\")\n\n  |> group()\n  |> distinct(column: \"station_id\")\n  |> count()",
           "refId": "A"
         }
       ],
@@ -159,7 +159,7 @@
             "type": "influxdb",
             "uid": "afrpmft5s97uod"
           },
-          "query": "from(bucket: \"stations\")\n  |> range(start: -24h)\n  |> filter(fn: (r) => r._measurement == \"weather_station\" and r._field == \"temperature\")\n  |> filter(fn: (r) => r.station_id =~ /^${station:regex}$/)\n  |> last()\n  |> map(fn: (r) => ({ r with _value: float(v: int(v: now()) - int(v: r._time)) / 1000000000.0 }))\n  |> keep(columns: [\"_value\"])",
+          "query": "from(bucket: \"stations\")\n  |> range(start: -24h)\n  |> filter(fn: (r) => r._measurement == \"weather_station\" and r._field == \"temperature\")\n\n  |> last()\n  |> map(fn: (r) => ({ r with _value: float(v: int(v: now()) - int(v: r._time)) / 1000000000.0 }))\n  |> keep(columns: [\"_value\"])",
           "refId": "A"
         }
       ],
@@ -219,7 +219,7 @@
             "type": "influxdb",
             "uid": "afrpmft5s97uod"
           },
-          "query": "from(bucket: \"stations\")\n  |> range(start: -24h)\n  |> filter(fn: (r) => r._measurement == \"weather_station\" and r._field == \"temperature\")\n  |> filter(fn: (r) => r.station_id =~ /^${station:regex}$/)\n  |> last()\n  |> keep(columns: [\"_value\", \"station_id\"])",
+          "query": "from(bucket: \"stations\")\n  |> range(start: -24h)\n  |> filter(fn: (r) => r._measurement == \"weather_station\" and r._field == \"temperature\")\n\n  |> last()\n  |> keep(columns: [\"_value\", \"station_id\"])",
           "refId": "A"
         }
       ],
@@ -302,7 +302,7 @@
             "type": "influxdb",
             "uid": "afrpmft5s97uod"
           },
-          "query": "from(bucket: \"stations\")\n  |> range(start: v.timeRangeStart, stop: v.timeRangeStop)\n  |> filter(fn: (r) => r._measurement == \"weather_station\")\n  |> filter(fn: (r) => r.station_id =~ /^${station:regex}$/)\n  |> filter(fn: (r) => r._field == \"temperature\")\n  |> last()",
+          "query": "from(bucket: \"stations\")\n  |> range(start: v.timeRangeStart, stop: v.timeRangeStop)\n  |> filter(fn: (r) => r._measurement == \"weather_station\")\n\n  |> filter(fn: (r) => r._field =~ /^temperature.*/)\n  |> last()",
           "refId": "A"
         }
       ],
@@ -373,7 +373,7 @@
             "type": "influxdb",
             "uid": "afrpmft5s97uod"
           },
-          "query": "from(bucket: \"stations\")\n  |> range(start: v.timeRangeStart, stop: v.timeRangeStop)\n  |> filter(fn: (r) => r._measurement == \"weather_station\")\n  |> filter(fn: (r) => r.station_id =~ /^${station:regex}$/)\n  |> filter(fn: (r) => r._field == \"humidity\")\n  |> last()",
+          "query": "from(bucket: \"stations\")\n  |> range(start: v.timeRangeStart, stop: v.timeRangeStop)\n  |> filter(fn: (r) => r._measurement == \"weather_station\")\n\n  |> filter(fn: (r) => r._field == \"humidity\")\n  |> last()",
           "refId": "A"
         }
       ],
@@ -452,7 +452,7 @@
             "type": "influxdb",
             "uid": "afrpmft5s97uod"
           },
-          "query": "from(bucket: \"stations\")\n  |> range(start: v.timeRangeStart, stop: v.timeRangeStop)\n  |> filter(fn: (r) => r._measurement == \"weather_station\")\n  |> filter(fn: (r) => r.station_id =~ /^${station:regex}$/)\n  |> filter(fn: (r) => r._field == \"pressure\")\n  |> last()",
+          "query": "from(bucket: \"stations\")\n  |> range(start: v.timeRangeStart, stop: v.timeRangeStop)\n  |> filter(fn: (r) => r._measurement == \"weather_station\")\n\n  |> filter(fn: (r) => r._field == \"pressure\")\n  |> last()",
           "refId": "A"
         }
       ],
@@ -523,7 +523,7 @@
             "type": "influxdb",
             "uid": "afrpmft5s97uod"
           },
-          "query": "from(bucket: \"stations\")\n  |> range(start: v.timeRangeStart, stop: v.timeRangeStop)\n  |> filter(fn: (r) => r._measurement == \"weather_station\")\n  |> filter(fn: (r) => r.station_id =~ /^${station:regex}$/)\n  |> filter(fn: (r) => r._field == \"lux\")\n  |> last()",
+          "query": "from(bucket: \"stations\")\n  |> range(start: v.timeRangeStart, stop: v.timeRangeStop)\n  |> filter(fn: (r) => r._measurement == \"weather_station\")\n\n  |> filter(fn: (r) => r._field == \"lux\")\n  |> last()",
           "refId": "A"
         }
       ],
@@ -594,7 +594,7 @@
             "type": "influxdb",
             "uid": "afrpmft5s97uod"
           },
-          "query": "from(bucket: \"stations\")\n  |> range(start: v.timeRangeStart, stop: v.timeRangeStop)\n  |> filter(fn: (r) => r._measurement == \"weather_station\")\n  |> filter(fn: (r) => r.station_id =~ /^${station:regex}$/)\n  |> filter(fn: (r) => r._field == \"wind_speed\")\n  |> last()",
+          "query": "from(bucket: \"stations\")\n  |> range(start: v.timeRangeStart, stop: v.timeRangeStop)\n  |> filter(fn: (r) => r._measurement == \"weather_station\")\n\n  |> filter(fn: (r) => r._field == \"wind_speed\")\n  |> last()",
           "refId": "A"
         }
       ],
@@ -660,7 +660,7 @@
             "type": "influxdb",
             "uid": "afrpmft5s97uod"
           },
-          "query": "from(bucket: \"stations\")\n  |> range(start: v.timeRangeStart, stop: v.timeRangeStop)\n  |> filter(fn: (r) => r._measurement == \"weather_station\")\n  |> filter(fn: (r) => r.station_id =~ /^${station:regex}$/)\n  |> filter(fn: (r) => r._field == \"rain_mm\")\n  |> sum()",
+          "query": "from(bucket: \"stations\")\n  |> range(start: v.timeRangeStart, stop: v.timeRangeStop)\n  |> filter(fn: (r) => r._measurement == \"weather_station\")\n\n  |> filter(fn: (r) => r._field == \"rain_mm\")\n  |> sum()",
           "refId": "A"
         }
       ],
@@ -753,7 +753,7 @@
             "type": "influxdb",
             "uid": "afrpmft5s97uod"
           },
-          "query": "from(bucket: \"stations\")\n  |> range(start: v.timeRangeStart, stop: v.timeRangeStop)\n  |> filter(fn: (r) => r._measurement == \"weather_station\")\n  |> filter(fn: (r) => r.station_id =~ /^${station:regex}$/)\n  |> filter(fn: (r) => r._field == \"temperature\")\n  |> aggregateWindow(every: v.windowPeriod, fn: mean, createEmpty: false)\n",
+          "query": "from(bucket: \"stations\")\n  |> range(start: v.timeRangeStart, stop: v.timeRangeStop)\n  |> filter(fn: (r) => r._measurement == \"weather_station\")\n\n  |> filter(fn: (r) => r._field =~ /^temperature.*/)\n  |> aggregateWindow(every: v.windowPeriod, fn: mean, createEmpty: false)\n",
           "refId": "A"
         }
       ],
@@ -847,7 +847,7 @@
             "type": "influxdb",
             "uid": "afrpmft5s97uod"
           },
-          "query": "from(bucket: \"stations\")\n  |> range(start: v.timeRangeStart, stop: v.timeRangeStop)\n  |> filter(fn: (r) => r._measurement == \"weather_station\")\n  |> filter(fn: (r) => r.station_id =~ /^${station:regex}$/)\n  |> filter(fn: (r) => r._field == \"humidity\")\n  |> aggregateWindow(every: v.windowPeriod, fn: mean, createEmpty: false)\n",
+          "query": "from(bucket: \"stations\")\n  |> range(start: v.timeRangeStart, stop: v.timeRangeStop)\n  |> filter(fn: (r) => r._measurement == \"weather_station\")\n\n  |> filter(fn: (r) => r._field == \"humidity\")\n  |> aggregateWindow(every: v.windowPeriod, fn: mean, createEmpty: false)\n",
           "refId": "A"
         }
       ],
@@ -942,7 +942,7 @@
             "type": "influxdb",
             "uid": "afrpmft5s97uod"
           },
-          "query": "from(bucket: \"stations\")\n  |> range(start: v.timeRangeStart, stop: v.timeRangeStop)\n  |> filter(fn: (r) => r._measurement == \"weather_station\")\n  |> filter(fn: (r) => r.station_id =~ /^${station:regex}$/)\n  |> filter(fn: (r) => r._field == \"pressure\")\n  |> aggregateWindow(every: v.windowPeriod, fn: mean, createEmpty: false)\n",
+          "query": "from(bucket: \"stations\")\n  |> range(start: v.timeRangeStart, stop: v.timeRangeStop)\n  |> filter(fn: (r) => r._measurement == \"weather_station\")\n\n  |> filter(fn: (r) => r._field == \"pressure\")\n  |> aggregateWindow(every: v.windowPeriod, fn: mean, createEmpty: false)\n",
           "refId": "A"
         }
       ],
@@ -1034,7 +1034,7 @@
             "type": "influxdb",
             "uid": "afrpmft5s97uod"
           },
-          "query": "from(bucket: \"stations\")\n  |> range(start: v.timeRangeStart, stop: v.timeRangeStop)\n  |> filter(fn: (r) => r._measurement == \"weather_station\")\n  |> filter(fn: (r) => r.station_id =~ /^${station:regex}$/)\n  |> filter(fn: (r) => r._field == \"wind_speed\" or r._field == \"wind_direction\")\n  |> aggregateWindow(every: v.windowPeriod, fn: mean, createEmpty: false)\n",
+          "query": "from(bucket: \"stations\")\n  |> range(start: v.timeRangeStart, stop: v.timeRangeStop)\n  |> filter(fn: (r) => r._measurement == \"weather_station\")\n\n  |> filter(fn: (r) => r._field == \"wind_speed\" or r._field == \"wind_direction\")\n  |> aggregateWindow(every: v.windowPeriod, fn: mean, createEmpty: false)\n",
           "refId": "A"
         }
       ],
@@ -1125,7 +1125,7 @@
             "type": "influxdb",
             "uid": "afrpmft5s97uod"
           },
-          "query": "from(bucket: \"stations\")\n  |> range(start: v.timeRangeStart, stop: v.timeRangeStop)\n  |> filter(fn: (r) => r._measurement == \"weather_station\")\n  |> filter(fn: (r) => r.station_id =~ /^${station:regex}$/)\n  |> filter(fn: (r) => r._field == \"rain_mm\")\n  |> aggregateWindow(every: 5m, fn: sum)",
+          "query": "from(bucket: \"stations\")\n  |> range(start: v.timeRangeStart, stop: v.timeRangeStop)\n  |> filter(fn: (r) => r._measurement == \"weather_station\")\n\n  |> filter(fn: (r) => r._field == \"rain_mm\")\n  |> aggregateWindow(every: 5m, fn: sum)",
           "refId": "A"
         }
       ],
