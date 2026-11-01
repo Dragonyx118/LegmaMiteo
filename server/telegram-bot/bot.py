@@ -1,6 +1,7 @@
 import os
 import re
 import time
+import math
 import requests
 from datetime import datetime, time as dtime
 from influxdb_client import InfluxDBClient
@@ -144,37 +145,115 @@ def get_temp_range_24h():
     return max(temp_vals) - min(temp_vals)
 
 
-def get_lux_condition(minutes: int = 15):
-    """Legge il valore lux più recente e lo classifica. Solo di giorno (7:00-20:00)."""
+def get_lux_condition(lux: float):
+    """Classifica un valore lux già noto. Solo di giorno (7:00-20:00), altrimenti None."""
     now_time = datetime.now().time()
     if not (dtime(7, 0) <= now_time <= dtime(20, 0)):
         return None  # di notte il lux non è indicativo del cielo
 
+    # Soglie indicative — da tarare sul sensore reale una volta raccolti dati
+    if lux < 50:
+        return "🌙 Molto scuro (cielo coperto o crepuscolo)"
+    elif lux < 1000:
+        return "☁️ Cielo nuvoloso"
+    elif lux < 10000:
+        return "⛅ Parzialmente nuvoloso"
+    elif lux < 30000:
+        return "🌤️ Soleggiato velato"
+    else:
+        return "☀️ Pieno sole"
+
+
+def get_current_conditions():
+    """
+    Ultimo valore noto di temperatura, umidità, vento e lux, usato per
+    temperatura percepita e visualizzazione lux/umidità nel bollettino.
+    Ritorna un dict, con None sui campi mancanti.
+
+    NB: ogni campo ha il proprio "ultimo" timestamp (possono differire di
+    pochi millisecondi), quindi si prende il last() di ciascun campo
+    singolarmente invece di fare pivot() dopo last() — un pivot a quel punto
+    unirebbe le righe solo se condividono ESATTAMENTE lo stesso _time, cosa
+    non garantita, lasciando gli altri campi a null.
+    """
     query = f'''
     from(bucket: "{BUCKET}")
-      |> range(start: -{minutes}m)
+      |> range(start: -30m)
       |> filter(fn: (r) => r._measurement == "weather_station")
-      |> filter(fn: (r) => r._field == "lux")
       |> filter(fn: (r) => r.topic == "station/{STATION_ID}/base")
-      |> sort(columns: ["_time"], desc: true)
-      |> limit(n: 1)
+      |> filter(fn: (r) => r._field == "temperature" or r._field == "humidity" or r._field == "wind_speed" or r._field == "lux")
+      |> group(columns: ["_field"])
+      |> last()
     '''
     tables = query_api.query(query)
+    result = {"temperature": None, "humidity": None, "wind_speed": None, "lux": None}
     for table in tables:
         for record in table.records:
-            lux = record.get_value()
-            # Soglie indicative — da tarare sul sensore reale una volta raccolti dati
-            if lux < 50:
-                return "🌙 Molto scuro (cielo coperto o crepuscolo)"
-            elif lux < 1000:
-                return "☁️ Cielo nuvoloso"
-            elif lux < 10000:
-                return "⛅ Parzialmente nuvoloso"
-            elif lux < 30000:
-                return "🌤️ Soleggiato velato"
-            else:
-                return "☀️ Pieno sole"
-    return None
+            field = record.get_field()
+            if field in result:
+                result[field] = record.get_value()
+    return result
+
+
+def compute_feels_like(temp_c: float, humidity: float, wind_speed_ms: float):
+    """
+    Temperatura percepita — stessa logica usata nel pannello Grafana:
+    Heat Index (Rothfusz) sopra 27°C, Wind Chill (NWS/EC) sotto 10°C con
+    vento >= 4.8 km/h, altrimenti la temperatura grezza. wind_speed_ms è
+    in m/s (come scritto dal sensore) e viene convertito in km/h per la
+    formula del wind chill.
+    """
+    if temp_c is None or humidity is None:
+        return None
+
+    wind_kmh = (wind_speed_ms * 3.6) if wind_speed_ms is not None else 0.0
+
+    if temp_c >= 27.0:
+        t, h = temp_c, humidity
+        return (
+            -8.78469475556
+            + 1.61139411 * t
+            + 2.33854883889 * h
+            - 0.14611605 * t * h
+            - 0.012308094 * t * t
+            - 0.0164248277778 * h * h
+            + 0.002211732 * t * t * h
+            + 0.00072546 * t * h * h
+            - 0.000003582 * t * t * h * h
+        )
+    elif temp_c <= 10.0 and wind_kmh >= 4.8:
+        v = wind_kmh ** 0.16
+        return 13.12 + 0.6215 * temp_c - 11.37 * v + 0.3965 * temp_c * v
+    else:
+        return temp_c
+
+
+def get_sun_times():
+    """
+    Legge alba/tramonto del giorno dalla measurement 'sun_times', scritta
+    da scripts/write_sun_times.py (una volta al giorno). Ritorna stringhe
+    'HH:MM' oppure None se non ancora disponibili.
+    """
+    query = f'''
+    from(bucket: "{BUCKET}")
+      |> range(start: -25h)
+      |> filter(fn: (r) => r._measurement == "sun_times")
+      |> filter(fn: (r) => r.station_id == "{STATION_ID}")
+      |> filter(fn: (r) => r._field == "sunrise_minutes" or r._field == "sunset_minutes")
+      |> last()
+    '''
+    tables = query_api.query(query)
+    minutes = {}
+    for table in tables:
+        for record in table.records:
+            minutes[record.get_field()] = record.get_value()
+
+    def fmt(total_minutes):
+        if total_minutes is None:
+            return None
+        return f"{int(total_minutes) // 60:02d}:{int(total_minutes) % 60:02d}"
+
+    return fmt(minutes.get("sunrise_minutes")), fmt(minutes.get("sunset_minutes"))
 
 
 # =====================================================================
@@ -478,18 +557,38 @@ def send_periodic_report():
         return
 
     forecast_text = get_forecast_text(pressure_vals[-1], temp_vals[-1])
-    lux_condition = get_lux_condition()
+
+    # --- Condizioni correnti: umidità, lux, temperatura percepita ---
+    conditions = get_current_conditions()
+    humidity = conditions.get("humidity")
+    lux = conditions.get("lux")
+    wind_speed = conditions.get("wind_speed")
+    feels_like = compute_feels_like(temp_vals[-1], humidity, wind_speed)
+    lux_condition = get_lux_condition(lux) if lux is not None else None
+
+    # --- Alba / Tramonto ---
+    sunrise, sunset = get_sun_times()
 
     message = (
         f"📊 <b>Bollettino {STATION_ID}</b>\n"
         f"🕐 {datetime.now().strftime('%H:%M')}\n"
-        f"🌡️ Temp: {temp_vals[-1]:.1f}°C\n"
-        f"📈 Pressione: {pressure_vals[-1]:.1f} hPa\n\n"
-        f"<b>Previsione:</b>\n{forecast_text}"
+        f"🌡️ Temp: {temp_vals[-1]:.1f}°C"
     )
+    if feels_like is not None:
+        message += f" (percepita {feels_like:.1f}°C)"
+    message += f"\n📈 Pressione: {pressure_vals[-1]:.1f} hPa"
+    if humidity is not None:
+        message += f"\n💧 Umidità: {humidity:.0f}%"
+    if lux is not None:
+        message += f"\n☀️ Luce: {lux:.0f} lux"
+
+    message += f"\n\n<b>Previsione:</b>\n{forecast_text}"
 
     if lux_condition:
         message += f"\n\n<b>Cielo attuale:</b> {lux_condition}"
+
+    if sunrise and sunset:
+        message += f"\n\n🌅 Alba: {sunrise} · 🌇 Tramonto: {sunset}"
 
     # --- Sezione allerte ufficiali ---
     alert_icons = {"gialla": "🟡", "arancione": "🟠", "rossa": "🔴", "verde": "🟢"}

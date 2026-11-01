@@ -1524,7 +1524,7 @@
           "calcs": [
             "lastNotNull"
           ],
-          "fields": "",
+          "fields": "/.*/",
           "values": false
         },
         "showPercentChange": false,
@@ -1586,7 +1586,7 @@
           "calcs": [
             "lastNotNull"
           ],
-          "fields": "",
+          "fields": "/.*/",
           "values": false
         },
         "showPercentChange": false,
@@ -1650,7 +1650,7 @@
   "timezone": "",
   "title": "LegmaMiteo — BASE Station",
   "uid": "legmamiteo-base",
-  "version": 4,
+  "version": 5,
   "weekStart": "",
   "description": "Dashboard stazione meteo LegmaMiteo — dati live e storici, con stato connettività."
 }
