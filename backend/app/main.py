@@ -9,7 +9,7 @@ from app.routers import stations, data
 from app.config import API_VERSION, PROJECT_NAME
 from contextlib import asynccontextmanager
 from apscheduler.schedulers.background import BackgroundScheduler
-from backend.scripts.write_sun_times import write_sun_times_for_all_stations
+from scripts.write_sun_times import write_sun_times_for_all_stations
 
 
 scheduler = BackgroundScheduler(timezone="Europe/Rome")

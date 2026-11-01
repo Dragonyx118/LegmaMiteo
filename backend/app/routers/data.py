@@ -18,6 +18,35 @@ router = APIRouter(prefix="/data", tags=["Data"])
 
 CORRECTION_FILE = "station_bias_memory.json"
 
+
+def compute_feels_like(temp_c, humidity, wind_speed_ms):
+    """Temperatura percepita — stessa formula usata nel pannello Grafana e nel bot Telegram.
+    Heat Index (Rothfusz) sopra 27°C, Wind Chill (NWS/EC) sotto 10°C con vento >= 4.8 km/h,
+    altrimenti la temperatura grezza. wind_speed_ms in m/s, convertito in km/h per il wind chill."""
+    if temp_c is None or humidity is None:
+        return None
+
+    wind_kmh = (wind_speed_ms * 3.6) if wind_speed_ms is not None else 0.0
+
+    if temp_c >= 27.0:
+        t, h = temp_c, humidity
+        return (
+            -8.78469475556
+            + 1.61139411 * t
+            + 2.33854883889 * h
+            - 0.14611605 * t * h
+            - 0.012308094 * t * t
+            - 0.0164248277778 * h * h
+            + 0.002211732 * t * t * h
+            + 0.00072546 * t * h * h
+            - 0.000003582 * t * t * h * h
+        )
+    elif temp_c <= 10.0 and wind_kmh >= 4.8:
+        v = wind_kmh ** 0.16
+        return 13.12 + 0.6215 * temp_c - 11.37 * v + 0.3965 * temp_c * v
+    else:
+        return temp_c
+
 def get_influx_client():
     return InfluxDBClient(url=INFLUX_URL, token=INFLUX_TOKEN, org=INFLUX_ORG)
 
@@ -86,6 +115,12 @@ def get_latest(station_id: str, module: str = "base"):
 
         if not data:
             raise HTTPException(status_code=404, detail="No recent data found")
+
+        # --- Temperatura percepita (solo se ci sono temperatura e umidità, es. modulo "base") ---
+        if "temperature" in data and "humidity" in data:
+            data["feels_like"] = compute_feels_like(
+                data.get("temperature"), data.get("humidity"), data.get("wind_speed")
+            )
 
         # --- Alba/tramonto astronomici + controllo coerenza col sensore lux ---
         meta = get_station_meta(station_id) or {}
