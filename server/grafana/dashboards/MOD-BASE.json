@@ -1318,6 +1318,294 @@
         },
         "overrides": []
       }
+    },
+    {
+      "datasource": {
+        "type": "influxdb",
+        "uid": "afrpmft5s97uod"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "mappings": [],
+          "max": 60,
+          "min": -30,
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "blue",
+                "value": null
+              },
+              {
+                "color": "green",
+                "value": 0
+              },
+              {
+                "color": "yellow",
+                "value": 30
+              },
+              {
+                "color": "red",
+                "value": 40
+              }
+            ]
+          },
+          "unit": "celsius"
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 4,
+        "w": 4,
+        "x": 0,
+        "y": 25
+      },
+      "id": 200,
+      "options": {
+        "minVizHeight": 75,
+        "minVizWidth": 75,
+        "orientation": "auto",
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        },
+        "showThresholdLabels": false,
+        "showThresholdMarkers": true,
+        "sizing": "auto"
+      },
+      "pluginVersion": "10.4.0",
+      "targets": [
+        {
+          "datasource": {
+            "type": "influxdb",
+            "uid": "afrpmft5s97uod"
+          },
+          "query": "import \"math\"\n\nfrom(bucket: \"stations\")\n  |> range(start: v.timeRangeStart, stop: v.timeRangeStop)\n  |> filter(fn: (r) => r._measurement == \"weather_station\")\n  |> filter(fn: (r) => r._field == \"temperature\" or r._field == \"humidity\" or r._field == \"wind_speed\")\n  |> pivot(rowKey: [\"_time\"], columnKey: [\"_field\"], valueColumn: \"_value\")\n  |> map(fn: (r) => ({\n      r with\n      _value:\n        if r.temperature >= 27.0 then\n          -8.78469475556\n            + 1.61139411 * r.temperature\n            + 2.33854883889 * r.humidity\n            - 0.14611605 * r.temperature * r.humidity\n            - 0.012308094 * r.temperature * r.temperature\n            - 0.0164248277778 * r.humidity * r.humidity\n            + 0.002211732 * r.temperature * r.temperature * r.humidity\n            + 0.00072546 * r.temperature * r.humidity * r.humidity\n            - 0.000003582 * r.temperature * r.temperature * r.humidity * r.humidity\n        else if r.temperature <= 10.0 and r.wind_speed >= 4.8 then\n          13.12\n            + 0.6215 * r.temperature\n            - 11.37 * math.pow(x: r.wind_speed, y: 0.16)\n            + 0.3965 * r.temperature * math.pow(x: r.wind_speed, y: 0.16)\n        else\n          r.temperature\n  }))\n  |> keep(columns: [\"_time\", \"_value\"])\n  |> last()",
+          "refId": "A"
+        }
+      ],
+      "title": "🥵 Temperatura Percepita",
+      "type": "gauge"
+    },
+    {
+      "datasource": {
+        "type": "influxdb",
+        "uid": "afrpmft5s97uod"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "color": {
+            "fixedColor": "orange",
+            "mode": "fixed"
+          },
+          "custom": {
+            "axisBorderShow": false,
+            "axisCenteredZero": false,
+            "axisColorMode": "text",
+            "axisLabel": "",
+            "axisPlacement": "auto",
+            "barAlignment": 0,
+            "drawStyle": "line",
+            "fillOpacity": 10,
+            "gradientMode": "none",
+            "hideFrom": {
+              "legend": false,
+              "tooltip": false,
+              "viz": false
+            },
+            "insertNulls": false,
+            "lineInterpolation": "linear",
+            "lineWidth": 2,
+            "pointSize": 5,
+            "scaleDistribution": {
+              "type": "linear"
+            },
+            "showPoints": "auto",
+            "spanNulls": false,
+            "stacking": {
+              "group": "A",
+              "mode": "none"
+            },
+            "thresholdsStyle": {
+              "mode": "off"
+            }
+          },
+          "mappings": [],
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              },
+              {
+                "color": "red",
+                "value": 80
+              }
+            ]
+          },
+          "unit": "celsius"
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 0,
+        "y": 29
+      },
+      "id": 201,
+      "options": {
+        "legend": {
+          "calcs": [],
+          "displayMode": "list",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "tooltip": {
+          "mode": "single",
+          "sort": "none"
+        }
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "influxdb",
+            "uid": "afrpmft5s97uod"
+          },
+          "query": "import \"math\"\n\nfrom(bucket: \"stations\")\n  |> range(start: v.timeRangeStart, stop: v.timeRangeStop)\n  |> filter(fn: (r) => r._measurement == \"weather_station\")\n  |> filter(fn: (r) => r._field == \"temperature\" or r._field == \"humidity\" or r._field == \"wind_speed\")\n  |> pivot(rowKey: [\"_time\"], columnKey: [\"_field\"], valueColumn: \"_value\")\n  |> map(fn: (r) => ({\n      r with\n      _value:\n        if r.temperature >= 27.0 then\n          -8.78469475556\n            + 1.61139411 * r.temperature\n            + 2.33854883889 * r.humidity\n            - 0.14611605 * r.temperature * r.humidity\n            - 0.012308094 * r.temperature * r.temperature\n            - 0.0164248277778 * r.humidity * r.humidity\n            + 0.002211732 * r.temperature * r.temperature * r.humidity\n            + 0.00072546 * r.temperature * r.humidity * r.humidity\n            - 0.000003582 * r.temperature * r.temperature * r.humidity * r.humidity\n        else if r.temperature <= 10.0 and r.wind_speed >= 4.8 then\n          13.12\n            + 0.6215 * r.temperature\n            - 11.37 * math.pow(x: r.wind_speed, y: 0.16)\n            + 0.3965 * r.temperature * math.pow(x: r.wind_speed, y: 0.16)\n        else\n          r.temperature\n  }))\n  |> keep(columns: [\"_time\", \"_value\"])\n  |> aggregateWindow(every: v.windowPeriod, fn: mean, createEmpty: false)",
+          "refId": "A"
+        }
+      ],
+      "title": "🥵 Temperatura Percepita — Storico",
+      "type": "timeseries"
+    },
+    {
+      "datasource": {
+        "type": "influxdb",
+        "uid": "afrpmft5s97uod"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "mappings": [],
+          "color": {
+            "mode": "fixed",
+            "fixedColor": "yellow"
+          },
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "yellow",
+                "value": null
+              }
+            ]
+          },
+          "unit": "none"
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 3,
+        "w": 4,
+        "x": 0,
+        "y": 37
+      },
+      "id": 300,
+      "options": {
+        "colorMode": "value",
+        "graphMode": "none",
+        "justifyMode": "auto",
+        "orientation": "auto",
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        },
+        "showPercentChange": false,
+        "textMode": "value_and_name",
+        "wideLayout": true
+      },
+      "pluginVersion": "10.4.0",
+      "targets": [
+        {
+          "datasource": {
+            "type": "influxdb",
+            "uid": "afrpmft5s97uod"
+          },
+          "query": "from(bucket: \"stations\")\n  |> range(start: -25h)\n  |> filter(fn: (r) => r._measurement == \"sun_times\")\n  |> filter(fn: (r) => r._field == \"sunrise_minutes\")\n  |> last()\n  |> map(fn: (r) => ({\n      r with\n      _value: string(v: r._value / 60) + \":\" + (if r._value % 60 < 10 then \"0\" else \"\") + string(v: r._value % 60)\n  }))\n  |> keep(columns: [\"_time\", \"_value\"])",
+          "refId": "A"
+        }
+      ],
+      "title": "🌅 Alba",
+      "type": "stat"
+    },
+    {
+      "datasource": {
+        "type": "influxdb",
+        "uid": "afrpmft5s97uod"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "mappings": [],
+          "color": {
+            "mode": "fixed",
+            "fixedColor": "orange"
+          },
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "orange",
+                "value": null
+              }
+            ]
+          },
+          "unit": "none"
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 3,
+        "w": 4,
+        "x": 4,
+        "y": 37
+      },
+      "id": 301,
+      "options": {
+        "colorMode": "value",
+        "graphMode": "none",
+        "justifyMode": "auto",
+        "orientation": "auto",
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        },
+        "showPercentChange": false,
+        "textMode": "value_and_name",
+        "wideLayout": true
+      },
+      "pluginVersion": "10.4.0",
+      "targets": [
+        {
+          "datasource": {
+            "type": "influxdb",
+            "uid": "afrpmft5s97uod"
+          },
+          "query": "from(bucket: \"stations\")\n  |> range(start: -25h)\n  |> filter(fn: (r) => r._measurement == \"sun_times\")\n  |> filter(fn: (r) => r._field == \"sunset_minutes\")\n  |> last()\n  |> map(fn: (r) => ({\n      r with\n      _value: string(v: r._value / 60) + \":\" + (if r._value % 60 < 10 then \"0\" else \"\") + string(v: r._value % 60)\n  }))\n  |> keep(columns: [\"_time\", \"_value\"])",
+          "refId": "A"
+        }
+      ],
+      "title": "🌇 Tramonto",
+      "type": "stat"
     }
   ],
   "refresh": "10s",
@@ -1362,7 +1650,7 @@
   "timezone": "",
   "title": "LegmaMiteo — BASE Station",
   "uid": "legmamiteo-base",
-  "version": 1,
+  "version": 4,
   "weekStart": "",
   "description": "Dashboard stazione meteo LegmaMiteo — dati live e storici, con stato connettività."
 }

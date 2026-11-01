@@ -7,6 +7,40 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from app.routers import stations, data
 from app.config import API_VERSION, PROJECT_NAME
+from contextlib import asynccontextmanager
+from apscheduler.schedulers.background import BackgroundScheduler
+from backend.scripts.write_sun_times import write_sun_times_for_all_stations
+
+
+scheduler = BackgroundScheduler(timezone="Europe/Rome")
+
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    # --- STARTUP ---
+    # Calcolo immediato all'avvio del server, cosi' i dati di alba/tramonto
+    # sono gia' disponibili senza aspettare la prossima esecuzione pianificata
+    try:
+        write_sun_times_for_all_stations()
+    except Exception as e:
+        print(f"[sun_times] Errore al calcolo iniziale: {e}")
+
+    # Pianifica l'esecuzione automatica ogni giorno alle 00:05
+    scheduler.add_job(
+        write_sun_times_for_all_stations,
+        "cron",
+        hour=0,
+        minute=5,
+        id="write_sun_times_daily",
+        replace_existing=True,
+    )
+    scheduler.start()
+
+    yield  # <-- il server gira qui
+
+    # --- SHUTDOWN ---
+    scheduler.shutdown()
+
 
 app = FastAPI(
     title=PROJECT_NAME,
@@ -20,7 +54,8 @@ API pubblica per accedere ai dati della rete di stazioni meteo LegmaMiteo.
     license_info={
         "name": "Hippocratic License HL3-CL-ECO-LAW-MIL-SV",
         "url": "https://firstdonoharm.dev/version/3/0/cl-eco-law-mil-sv.html"
-    }
+    },
+    lifespan=lifespan
 )
 
 # --- CORS ---

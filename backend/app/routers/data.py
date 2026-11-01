@@ -12,6 +12,7 @@ import os
 from app.services.forecast import compute_forecast
 from app.services.official_alerts import get_official_alerts_summary
 from app.models.stations_registry import get_station_meta
+from app.services.astronomy import get_sun_times, is_daylight
 
 router = APIRouter(prefix="/data", tags=["Data"])
 
@@ -86,7 +87,29 @@ def get_latest(station_id: str, module: str = "base"):
         if not data:
             raise HTTPException(status_code=404, detail="No recent data found")
 
-        return {"success": True, "station_id": station_id, "module": module, "data": data}
+        # --- Alba/tramonto astronomici + controllo coerenza col sensore lux ---
+        meta = get_station_meta(station_id) or {}
+        lat = meta.get("latitude")
+        lon = meta.get("longitude")
+
+        sun_info = get_sun_times(lat, lon)
+
+        sensor_warning = None
+        if "lux" in data:
+            daylight = is_daylight(lat, lon)
+            if daylight and data["lux"] < 50:
+                sensor_warning = "⚠️ Lux basso in pieno giorno — controllare sensore VEML7700"
+            elif not daylight and data["lux"] > 500:
+                sensor_warning = "⚠️ Lux alto di notte — controllare sensore VEML7700"
+
+        return {
+            "success": True,
+            "station_id": station_id,
+            "module": module,
+            "data": data,
+            "sun": sun_info,
+            "sensor_warning": sensor_warning,
+        }
     except HTTPException:
         raise
     except Exception as e:
