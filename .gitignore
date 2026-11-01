@@ -90,3 +90,10 @@ firmware/base/Stazione-001/src/secrets.h
 *.key
 *.crt
 .env
+
+# Backup KiCad
+hardware/base/PCBbase/PCBbase-backups/
+
+# Cache KiCad footprint
+fp-info-cache
+**/fp-info-cache
