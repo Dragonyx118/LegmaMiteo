@@ -4,7 +4,7 @@ on:
   workflow_dispatch:
     inputs:
       tag:
-        description: 'Tag per la release (es. v1.2.0)'
+        description: 'Tag per la release (es. firmware-v1.0.0)'
         required: true
         type: string
 
@@ -30,13 +30,6 @@ jobs:
           done
           cd ../..
           ls -la release-zips
-
-      - name: Crea tag Git
-        run: |
-          git config user.name "github-actions[bot]"
-          git config user.email "github-actions[bot]@users.noreply.github.com"
-          git tag ${{ inputs.tag }}
-          git push origin ${{ inputs.tag }}
 
       - name: Crea Release con tutti gli zip
         uses: softprops/action-gh-release@v2

@@ -3,7 +3,7 @@ name: Release Installer
 on:
   push:
     tags:
-      - 'v*'
+      - 'server-v*'
 
 permissions:
   contents: write
