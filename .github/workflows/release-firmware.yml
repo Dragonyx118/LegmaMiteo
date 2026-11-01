@@ -1,0 +1,46 @@
+name: Release Firmware
+
+on:
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: 'Tag per la release (es. v1.2.0)'
+        required: true
+        type: string
+
+permissions:
+  contents: write
+
+jobs:
+  build-and-release:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Crea zip per ogni cartella firmware
+        run: |
+          mkdir -p release-zips
+          cd firmware/base
+          for dir in */ ; do
+            name="${dir%/}"
+            if [ -d "$name" ]; then
+              zip -r "../../release-zips/${name}.zip" "$name"
+            fi
+          done
+          cd ../..
+          ls -la release-zips
+
+      - name: Crea tag Git
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git tag ${{ inputs.tag }}
+          git push origin ${{ inputs.tag }}
+
+      - name: Crea Release con tutti gli zip
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ inputs.tag }}
+          files: release-zips/*.zip
+          generate_release_notes: true
