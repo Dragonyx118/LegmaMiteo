@@ -5,7 +5,7 @@
 from fastapi import APIRouter, HTTPException, Query
 from app.config import INFLUX_URL, INFLUX_TOKEN, INFLUX_ORG, INFLUX_BUCKET, STATION_ALTITUDE_M
 from influxdb_client import InfluxDBClient
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 import requests
 import json
 import os
@@ -16,7 +16,7 @@ from app.services.astronomy import get_sun_times, is_daylight
 
 router = APIRouter(prefix="/data", tags=["Data"])
 
-CORRECTION_FILE = "station_bias_memory.json"
+CORRECTION_FILE = "data/station_bias_memory.json"
 
 
 def compute_feels_like(temp_c, humidity, wind_speed_ms):
@@ -52,6 +52,7 @@ def get_influx_client():
 
 # --- SISTEMA DI APPRENDIMENTO SEMPLICE (BIAS CORRECTION) ---
 def load_bias_memory():
+    os.makedirs(os.path.dirname(CORRECTION_FILE), exist_ok=True)
     if os.path.exists(CORRECTION_FILE):
         try:
             with open(CORRECTION_FILE, "r") as f:
@@ -242,7 +243,11 @@ def get_alerts(station_id: str):
     
 @router.get("/{station_id}/extended-forecast")
 def get_extended_forecast(station_id: str, module: str = "base"):
-    """Previsione estesa a 5 giorni corretta e migliorata nel tempo confrontandosi con Open-Meteo."""
+    """
+    Previsione estesa a 5 giorni: usa il calcolo fisico reale di compute_extended_forecast
+    (pressione + trend + umidità + fulmini), corretto nel tempo confrontandosi con Open-Meteo.
+    Ogni giorno è una proiezione per persistenza smorzata, non più una rotazione di icone finte.
+    """
     client = get_influx_client()
 
     try:
@@ -255,7 +260,18 @@ def get_extended_forecast(station_id: str, module: str = "base"):
 
         current_pressure = pressure_vals_10[-1]
         current_temp = temp_vals_10[-1]
-        current_humidity = humidity_vals_10[-1] if humidity_vals_10 else 50.0
+        current_humidity = humidity_vals_10[-1] if humidity_vals_10 else None
+
+        # NEW — vento (per temperatura percepita), lux (per copertura nuvolosa) e
+        # fulmini (per override temporale), stesso pattern usato in /forecast
+        current_wind_speed = _query_latest_value(client, station_id, module, "wind_speed", 10)
+        current_lux = _query_latest_value(client, station_id, module, "lux", 10)
+        lightning_distance_km = _query_latest_value(client, station_id, module, "lightning_distance_km", 30)
+        lightning_strikes_last_hour = _query_latest_value(client, station_id, module, "lightning_strikes_last_hour", 60)
+
+        # NEW — trend di pressione (mancava: senza questo il forecast risultava sempre "stabile")
+        pressure_3h = _query_recent_values(client, station_id, module, "pressure", 180)
+        delta_3h = (pressure_3h[-1] - pressure_3h[0]) if len(pressure_3h) >= 2 else None
 
         meta = get_station_meta(station_id) or {}
         altitude = meta.get("altitude", STATION_ALTITUDE_M)
@@ -277,69 +293,60 @@ def get_extended_forecast(station_id: str, module: str = "base"):
         # Applichiamo la correzione del bias accumulato nel tempo
         corrected_current_temp = current_temp + learned_temp_bias
 
-        # Calcola il forecast di base con i dati corretti
+        # NEW — temperatura percepita sul dato corretto
+        feels_like = compute_feels_like(corrected_current_temp, current_humidity, current_wind_speed)
+
+        # Calcola il forecast reale (oggi + proiezione a 5 giorni) con tutti i dati disponibili
         base_forecast = compute_forecast(
             station_id=station_id,
             pressure_station=current_pressure,
             temp_now=corrected_current_temp,
             altitude_m=altitude,
             month=now.month,
-            humidity=current_humidity
+            delta_3h=delta_3h,
+            humidity=current_humidity,
+            lux=current_lux,
+            dt_utc=datetime.now(timezone.utc),
+            latitude_deg=lat,
+            longitude_deg=lon,
+            lightning_distance_km=lightning_distance_km,
+            lightning_strikes_last_hour=lightning_strikes_last_hour,
         )
+        base_forecast["feels_like"] = round(feels_like, 1) if feels_like is not None else None
 
         days_it = ["Lunedì", "Martedì", "Mercoledì", "Giovedì", "Venerdì", "Sabato", "Domenica"]
-        forecast_days = []
 
-        varying_conditions = [
-            (base_forecast["icon"], base_forecast["label"].split("—")[0].strip()),
-            ("⛅", "Variabile"),
-            ("🌤️", "Nuvoloso con schiarite"),
-            ("🌧️", "Possibili piogge"),
-            ("☀️", "Prevalenza di sole")
-        ]
+        # Giorno 0 ("Oggi") usa direttamente il risultato di compute_forecast
+        today_range = base_forecast["temp_range_estimate"]
+        forecast_days = [{
+            "dayName": "Oggi",
+            "icon": base_forecast["icon"],
+            "condition": base_forecast["label"],
+            "tempRange": f"{int(round(corrected_current_temp - today_range))}° / {int(round(corrected_current_temp + today_range * 1.1))}°",
+            "confidence": 1.0,
+            "hourlyList": _build_hourly_preview(corrected_current_temp, base_forecast["icon"], base_forecast["condition"]),
+        }]
 
-        for i in range(5):
-            target_date = now + timedelta(days=i)
-            
-            if i == 0:
-                day_name = "Oggi"
-            elif i == 1:
-                day_name = "Domani"
-            else:
-                day_name = days_it[target_date.weekday()]
+        # Giorni 1-5 dalla proiezione fisica reale (extended_forecast), non più finta
+        for day_data in base_forecast["extended_forecast"]:
+            offset = day_data["day_offset"]
+            target_date = now + timedelta(days=offset)
+            day_name = "Domani" if offset == 1 else days_it[target_date.weekday()]
 
-            day_temp_offset = (i * 0.8) if i % 2 == 0 else -(i * 0.5)
-            effective_day_temp = corrected_current_temp + day_temp_offset
-
-            hourly_list = []
-            for hour in range(0, 24, 1):
-                temp_variation = 4.0 * ((hour - 14) / 12.0) if hour <= 14 else 4.0 * ((22 - hour) / 10.0)
-                h_temp = round(effective_day_temp + temp_variation, 1)
-                
-                icon_tuple = varying_conditions[i % len(varying_conditions)]
-                h_icon = icon_tuple[0]
-                h_cond = icon_tuple[1]
-
-                if hour < 6 or hour > 21:
-                    h_icon = "🌙"
-                    h_cond = "Sereno"
-
-                hourly_list.append({
-                    "time": f"{hour:02d}:00",
-                    "icon": h_icon,
-                    "condition": h_cond,
-                    "temp": f"{int(round(h_temp))}°",
-                    "rain": "assente" if "pioggia" not in h_cond.lower() else "0.5 mm"
-                })
-
-            min_t = int(round(effective_day_temp - 4))
-            max_t = int(round(effective_day_temp + 5))
+            # Stima termica approssimata dalla variazione di pressione proiettata
+            # (circa -0.3°C per hPa in meno rispetto a oggi, euristica grezza — non un
+            # modello fisico vero e proprio, serve solo a dare un numero plausibile)
+            pressure_delta_from_today = day_data["pressure_slp_estimate"] - base_forecast["pressure_slp"]
+            effective_day_temp = corrected_current_temp + pressure_delta_from_today * 0.3
+            day_range = day_data["temp_range_estimate"]
 
             forecast_days.append({
                 "dayName": day_name,
-                "icon": varying_conditions[i % len(varying_conditions)][0],
-                "tempRange": f"{min_t}° / {max_t}°",
-                "hourlyList": hourly_list
+                "icon": day_data["icon"],
+                "condition": day_data["label"],
+                "tempRange": f"{int(round(effective_day_temp - day_range))}° / {int(round(effective_day_temp + day_range * 1.1))}°",
+                "confidence": day_data["confidence"],
+                "hourlyList": _build_hourly_preview(effective_day_temp, day_data["icon"], day_data["condition"]),
             })
 
         return {
@@ -353,6 +360,35 @@ def get_extended_forecast(station_id: str, module: str = "base"):
         raise HTTPException(status_code=500, detail=str(e))
     finally:
         client.close()
+
+
+def _build_hourly_preview(day_temp: float, icon: str, condition: str):
+    """
+    Curva oraria semplificata attorno alla temperatura stimata del giorno (picco
+    verso le 14, minimo notturno), con l'icona/condizione del giorno applicata a
+    tutte le ore diurne e la luna di notte. Non è un modello orario reale — serve
+    solo a dare una preview coerente nell'app, non più icone casuali per ora.
+    """
+    hourly_list = []
+    is_rain_like = condition in ("pioggia", "temporale", "temporale_in_corso", "temporale_avvicinamento")
+    for hour in range(0, 24):
+        temp_variation = 4.0 * ((hour - 14) / 12.0) if hour <= 14 else 4.0 * ((22 - hour) / 10.0)
+        h_temp = round(day_temp + temp_variation, 1)
+
+        h_icon = icon
+        h_cond = condition
+        if hour < 6 or hour > 21:
+            h_icon = "🌙" if icon in ("☀️", "🌤️") else icon
+            h_cond = "sereno" if icon in ("☀️", "🌤️") else condition
+
+        hourly_list.append({
+            "time": f"{hour:02d}:00",
+            "icon": h_icon,
+            "condition": h_cond,
+            "temp": f"{int(round(h_temp))}°",
+            "rain": "0.5 mm" if is_rain_like else "assente",
+        })
+    return hourly_list
 
 
 def _query_recent_values(client, station_id: str, module: str, field: str, minutes: int):

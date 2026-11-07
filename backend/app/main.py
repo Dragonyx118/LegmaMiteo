@@ -10,6 +10,9 @@ from app.config import API_VERSION, PROJECT_NAME
 from contextlib import asynccontextmanager
 from apscheduler.schedulers.background import BackgroundScheduler
 from scripts.write_sun_times import write_sun_times_for_all_stations
+from scripts.forecast_tracker import log_forecast_snapshot, verify_due_forecasts
+# NB: NON "from backend.scripts..." — dentro il container /app corrisponde già
+# a backend/, quindi non esiste un package "backend" da un livello più su.
 
 
 scheduler = BackgroundScheduler(timezone="Europe/Rome")
@@ -34,6 +37,29 @@ async def lifespan(app: FastAPI):
         id="write_sun_times_daily",
         replace_existing=True,
     )
+
+    # Logga la previsione corrente (oggi + 5 giorni) come "in sospeso" ogni
+    # giorno alle 00:10 — dopo i dati solari, prima della verifica
+    scheduler.add_job(
+        log_forecast_snapshot,
+        "cron",
+        hour=0,
+        minute=10,
+        id="log_forecast_daily",
+        replace_existing=True,
+    )
+
+    # Verifica le previsioni il cui giorno target è ormai concluso, ogni
+    # giorno alle 00:15 — confronta con dato reale stazione + Open-Meteo
+    scheduler.add_job(
+        verify_due_forecasts,
+        "cron",
+        hour=0,
+        minute=15,
+        id="verify_forecast_daily",
+        replace_existing=True,
+    )
+
     scheduler.start()
 
     yield  # <-- il server gira qui

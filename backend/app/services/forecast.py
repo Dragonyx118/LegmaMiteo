@@ -33,6 +33,14 @@ LIGHTNING_APPROACHING_KM = 20.0
 LUX_CLEAR_RATIO = 0.7
 LUX_OVERCAST_RATIO = 0.25
 
+# Escursione termica giornaliera stimata (°C) in base all'umidità — aria secca
+# si raffredda/riscalda più velocemente, aria umida/nuvolosa frena entrambe
+TEMP_RANGE_BY_HUMIDITY = {
+    "dry": 6.0,      # umidità <= HUMIDITY_DRY_THRESHOLD
+    "normal": 4.5,
+    "humid": 3.0,    # umidità >= HUMIDITY_RAIN_BIAS_THRESHOLD
+}
+
 
 def get_season(month: int) -> str:
     if month in (12, 1, 2):
@@ -67,6 +75,17 @@ def _cloud_cover_from_lux(lux: float | None, expected_lux: float | None, is_dayt
     elif ratio >= LUX_OVERCAST_RATIO:
         return "parziale"
     return "coperto"
+
+
+def _temp_range_estimate(humidity: float | None) -> float:
+    """Escursione termica attesa (°C) in base all'umidità disponibile. Senza dato, valore medio."""
+    if humidity is None:
+        return TEMP_RANGE_BY_HUMIDITY["normal"]
+    if humidity <= HUMIDITY_DRY_THRESHOLD:
+        return TEMP_RANGE_BY_HUMIDITY["dry"]
+    if humidity >= HUMIDITY_RAIN_BIAS_THRESHOLD:
+        return TEMP_RANGE_BY_HUMIDITY["humid"]
+    return TEMP_RANGE_BY_HUMIDITY["normal"]
 
 
 def _classify_condition(
@@ -211,7 +230,9 @@ def compute_forecast(
         humidity=humidity,
         season=season,
         month=month,
+        cloud_cover=cloud_cover,
         recent_lightning_activity=lightning_alert,
+        lightning_strikes_last_hour=lightning_strikes_last_hour,
     )
 
     return {
@@ -233,6 +254,7 @@ def compute_forecast(
         "lightning_alert": lightning_alert,
         "worsening": worsening,
         "improving": improving,
+        "temp_range_estimate": _temp_range_estimate(humidity),
         "extended_forecast": extended,
     }
 
@@ -244,6 +266,12 @@ def compute_forecast(
 DAILY_DAMPING_FACTOR = 0.55
 CONFIDENCE_DECAY = [1.0, 0.75, 0.6, 0.45, 0.35, 0.3]
 
+# Quanto scende la confidence giornaliera per ogni segnale mancante (umidità, lux,
+# fulmini): con dati completi la confidence segue CONFIDENCE_DECAY; con dati
+# minimi (solo pressione) scende più in fretta, perché la proiezione si basa
+# su meno informazione reale.
+CONFIDENCE_PENALTY_PER_MISSING_SIGNAL = 0.08
+
 
 def compute_extended_forecast(
     pressure_slp: float,
@@ -253,15 +281,27 @@ def compute_extended_forecast(
     season: str,
     month: int,
     days: int = 5,
+    cloud_cover: str | None = None,
     recent_lightning_activity: bool = False,
+    lightning_strikes_last_hour: int | None = None,
 ) -> list[dict]:
     """
     Estrapola una previsione giorno-per-giorno fino a `days` giorni, per
     persistenza smorzata della pressione + decadimento del trend/accelerazione.
     Non è un modello fisico: indica una tendenza, non un valore esatto.
+
+    La copertura nuvolosa osservata OGGI (da lux) viene usata come ancora per il
+    giorno 1 — è il segnale più affidabile per il brevissimo termine — e decade
+    naturalmente nei giorni successivi, dove non ha più senso portarla avanti.
+    Un'allerta fulmini recente penalizza anche il giorno 2, non solo il giorno 1:
+    un sistema temporalesco attivo raramente si esaurisce in una notte netta.
     """
     t = SEASONAL_THRESHOLDS[season]
     accel = acceleration if acceleration is not None else 0.0
+
+    # Quanti segnali indipendenti abbiamo davvero, oltre alla sola pressione
+    missing_signals = sum(x is None for x in (humidity, cloud_cover))
+    confidence_penalty = missing_signals * CONFIDENCE_PENALTY_PER_MISSING_SIGNAL
 
     results = []
     projected_slp = pressure_slp
@@ -279,14 +319,26 @@ def compute_extended_forecast(
             seasonal_humidity_mean = 70.0 if season in ("autunno", "inverno") else 55.0
             projected_humidity = projected_humidity + (seasonal_humidity_mean - projected_humidity) * 0.15
 
+        # La copertura nuvolosa osservata resta valida solo come ancora del giorno 1
+        day_cloud_cover = cloud_cover if day == 1 else None
+
         condition, label, icon = _classify_condition(
-            projected_slp, t, projected_d3, projected_humidity, None, season, cloud_cover=None
+            projected_slp, t, projected_d3, projected_humidity, None, season, day_cloud_cover
         )
 
-        if recent_lightning_activity and day == 1 and condition not in ("temporale", "pioggia"):
-            condition, label, icon = "variabile", "Possibile instabilità residua dopo attività elettrica recente", "🌥️"
+        if recent_lightning_activity and day in (1, 2) and condition not in ("temporale", "pioggia"):
+            if day == 1:
+                strikes_txt = f" ({lightning_strikes_last_hour} scariche rilevate oggi)" if lightning_strikes_last_hour else ""
+                condition, label, icon = (
+                    "variabile",
+                    f"Possibile instabilità residua dopo attività elettrica recente{strikes_txt}",
+                    "🌥️",
+                )
+            else:
+                condition, label, icon = "variabile", "Possibile coda d'instabilità dal sistema temporalesco", "⛅"
 
         confidence = CONFIDENCE_DECAY[min(day, len(CONFIDENCE_DECAY) - 1)]
+        confidence = max(0.1, confidence - confidence_penalty)
 
         results.append({
             "day_offset": day,
@@ -294,7 +346,8 @@ def compute_extended_forecast(
             "label": label,
             "icon": icon,
             "pressure_slp_estimate": round(projected_slp, 1),
-            "confidence": confidence,
+            "temp_range_estimate": _temp_range_estimate(projected_humidity),
+            "confidence": round(confidence, 2),
         })
 
     return results

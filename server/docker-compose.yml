@@ -122,6 +122,10 @@ services:
     network_mode: "service:tailscale"
     env_file:
       - .env
+    volumes:
+      # NEW — persiste station_bias_memory.json, forecast_predictions.json e
+      # forecast_accuracy.json fuori dal container
+      - ./data/api-state:/app/data
     depends_on:
       tailscale:
         condition: service_healthy
