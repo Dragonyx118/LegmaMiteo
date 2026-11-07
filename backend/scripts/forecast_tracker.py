@@ -19,9 +19,11 @@ from influxdb_client import InfluxDBClient
 from app.config import INFLUX_URL, INFLUX_TOKEN, INFLUX_ORG, INFLUX_BUCKET, STATION_ALTITUDE_M
 from app.models.stations_registry import load_registry
 from app.services.forecast import compute_forecast, sea_level_pressure
+from app.services import openmeteo
 
 PENDING_FILE = "data/forecast_predictions.json"
 ACCURACY_FILE = "data/forecast_accuracy.json"
+BIAS_FILE = "data/station_bias_memory.json"
 
 # Mappa i weathercode Open-Meteo (WMO) alle stesse categorie usate da forecast.py,
 # per poter confrontare "mele con mele" la condizione prevista vs quella osservata
@@ -141,6 +143,77 @@ def _fetch_openmeteo_daily_weathercode(lat, lon, target_date: date):
 
 
 # =====================================================================
+# 0) BIAS — confronto con Open-Meteo su temperatura, pressione, umidità
+# =====================================================================
+
+def load_bias_memory():
+    default = {
+        "temp_bias": 0.0, "pressure_bias": 0.0, "humidity_bias": 0.0,
+        "samples_temp": 0, "samples_pressure": 0, "samples_humidity": 0,
+    }
+    data = _load_json(BIAS_FILE, default)
+    # merge per retrocompatibilità se il file esisteva già in formato vecchio
+    for k, v in default.items():
+        data.setdefault(k, v)
+    return data
+
+
+def _update_one_bias(memory: dict, bias_key: str, samples_key: str, predicted, actual):
+    """Media mobile incrementale dell'errore (actual - predicted) per una singola metrica."""
+    if predicted is None or actual is None:
+        return
+    error = actual - predicted
+    samples = memory.get(samples_key, 0) + 1
+    current_bias = memory.get(bias_key, 0.0)
+    new_bias = current_bias + (error - current_bias) / min(samples, 100)
+    memory[bias_key] = round(new_bias, 2)
+    memory[samples_key] = samples
+
+
+def update_bias_from_openmeteo():
+    """
+    Una volta al giorno (scheduler), confronta l'ultimo dato di ciascuna stazione
+    con Open-Meteo per temperatura, pressione e umidità, aggiornando il bias
+    medio per ciascuna metrica. Prima girava dentro /extended-forecast — ma
+    quell'endpoint viene chiamato solo quando l'app apre la schermata dettagli,
+    quindi il bias restava fermo per giorni. Qui è automatico e indipendente
+    dall'uso dell'app.
+    """
+    registry = load_registry()
+    memory = load_bias_memory()
+
+    for station_id, meta in registry.items():
+        lat = meta.get("latitude")
+        lon = meta.get("longitude")
+        if lat is None or lon is None:
+            continue
+
+        client = _get_influx_client()
+        try:
+            temp_vals = _query_recent_values(client, station_id, "base", "temperature", 10)
+            pressure_vals = _query_recent_values(client, station_id, "base", "pressure", 10)
+            humidity_vals = _query_recent_values(client, station_id, "base", "humidity", 10)
+        finally:
+            client.close()
+
+        if not temp_vals:
+            continue
+
+        om = openmeteo.fetch_current(lat, lon)
+        if not om:
+            continue
+
+        _update_one_bias(memory, "temp_bias", "samples_temp", temp_vals[-1], om.get("temperature_2m"))
+        if pressure_vals:
+            _update_one_bias(memory, "pressure_bias", "samples_pressure", pressure_vals[-1], om.get("surface_pressure"))
+        if humidity_vals:
+            _update_one_bias(memory, "humidity_bias", "samples_humidity", humidity_vals[-1], om.get("relative_humidity_2m"))
+
+    _save_json(BIAS_FILE, memory)
+    print(f"[forecast_tracker] Bias aggiornato: {memory}")
+
+
+# =====================================================================
 # 1) LOG — registra la previsione corrente come "in sospeso"
 # =====================================================================
 
@@ -179,14 +252,20 @@ def log_forecast_snapshot():
             delta_3h = (pressure_3h[-1] - pressure_3h[0]) if len(pressure_3h) >= 2 else None
             humidity_now = humidity_vals[-1] if humidity_vals else None
 
+            # Applica il bias accumulato (temp/pressione/umidità) prima del calcolo
+            bias = load_bias_memory()
+            corrected_temp = temp_vals[-1] + bias.get("temp_bias", 0.0)
+            corrected_pressure = pressure_vals[-1] + bias.get("pressure_bias", 0.0)
+            corrected_humidity = (humidity_now + bias.get("humidity_bias", 0.0)) if humidity_now is not None else None
+
             forecast = compute_forecast(
                 station_id=station_id,
-                pressure_station=pressure_vals[-1],
-                temp_now=temp_vals[-1],
+                pressure_station=corrected_pressure,
+                temp_now=corrected_temp,
                 altitude_m=altitude,
                 month=datetime.now().month,
                 delta_3h=delta_3h,
-                humidity=humidity_now,
+                humidity=corrected_humidity,
             )
         finally:
             client.close()
@@ -198,6 +277,15 @@ def log_forecast_snapshot():
             "pressure_slp_estimate": forecast["pressure_slp"],
             "confidence": 1.0,
         }] + forecast["extended_forecast"]
+
+        # Giorni 3-5: lo smorzamento locale ha ormai poco segnale (si veda forecast.py),
+        # quindi per quei giorni si usa direttamente il weathercode reale Open-Meteo
+        for day_data in all_days:
+            if day_data["day_offset"] >= 3:
+                target = today + timedelta(days=day_data["day_offset"])
+                om_daily = openmeteo.fetch_daily_forecast(lat, lon, target)
+                if om_daily:
+                    day_data["condition"] = om_daily["condition"]
 
         for day_data in all_days:
             target_date = today + timedelta(days=day_data["day_offset"])

@@ -10,7 +10,7 @@ from app.config import API_VERSION, PROJECT_NAME
 from contextlib import asynccontextmanager
 from apscheduler.schedulers.background import BackgroundScheduler
 from scripts.write_sun_times import write_sun_times_for_all_stations
-from scripts.forecast_tracker import log_forecast_snapshot, verify_due_forecasts
+from scripts.forecast_tracker import log_forecast_snapshot, verify_due_forecasts, update_bias_from_openmeteo
 # NB: NON "from backend.scripts..." — dentro il container /app corrisponde già
 # a backend/, quindi non esiste un package "backend" da un livello più su.
 
@@ -35,6 +35,17 @@ async def lifespan(app: FastAPI):
         hour=0,
         minute=5,
         id="write_sun_times_daily",
+        replace_existing=True,
+    )
+
+    # Aggiorna il bias (temp/pressione/umidità) confrontando con Open-Meteo, ogni
+    # giorno alle 00:08 — prima del log della previsione, cosi' usa un bias fresco
+    scheduler.add_job(
+        update_bias_from_openmeteo,
+        "cron",
+        hour=0,
+        minute=8,
+        id="update_bias_daily",
         replace_existing=True,
     )
 

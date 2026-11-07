@@ -16,8 +16,6 @@ from app.services.astronomy import get_sun_times, is_daylight
 
 router = APIRouter(prefix="/data", tags=["Data"])
 
-CORRECTION_FILE = "data/station_bias_memory.json"
-
 
 def compute_feels_like(temp_c, humidity, wind_speed_ms):
     """Temperatura percepita — stessa formula usata nel pannello Grafana e nel bot Telegram.
@@ -50,47 +48,13 @@ def compute_feels_like(temp_c, humidity, wind_speed_ms):
 def get_influx_client():
     return InfluxDBClient(url=INFLUX_URL, token=INFLUX_TOKEN, org=INFLUX_ORG)
 
-# --- SISTEMA DI APPRENDIMENTO SEMPLICE (BIAS CORRECTION) ---
-def load_bias_memory():
-    os.makedirs(os.path.dirname(CORRECTION_FILE), exist_ok=True)
-    if os.path.exists(CORRECTION_FILE):
-        try:
-            with open(CORRECTION_FILE, "r") as f:
-                return json.load(f)
-        except Exception:
-            pass
-    return {"temp_bias": 0.0, "pressure_bias": 0.0, "samples": 0}
-
-def update_bias_memory(predicted_temp, actual_temp):
-    """Aggiorna incrementalmente l'errore medio (apprendimento leggero senza ML pesante)"""
-    memory = load_bias_memory()
-    error = actual_temp - predicted_temp  # Errore = Reale - Previsto
-    samples = memory.get("samples", 0) + 1
-    
-    # Media mobile esponenziale o incrementale semplice
-    current_bias = memory.get("temp_bias", 0.0)
-    new_bias = current_bias + (error - current_bias) / min(samples, 100) # Limita l'inerzia
-    
-    memory["temp_bias"] = round(new_bias, 2)
-    memory["samples"] = samples
-    
-    try:
-        with open(CORRECTION_FILE, "w") as f:
-            json.dump(memory, f)
-    except Exception:
-        pass
-
-def fetch_open_meteo_baseline(lat: float, lon: float):
-    """Recupera il riscontro da Open-Meteo per confronto e calcolo dell'errore"""
-    try:
-        url = f"https://api.open-meteo.com/v1/forecast?latitude={lat}&longitude={lon}&current=temperature_2m,relative_humidity_2m,surface_pressure"
-        response = requests.get(url, timeout=3)
-        if response.status_code == 200:
-            data = response.json()
-            return data.get("current", {})
-    except Exception:
-        pass
-    return None
+# --- BIAS CORRECTION ---
+# L'aggiornamento del bias (confronto con Open-Meteo) ora gira nello scheduler
+# giornaliero (scripts/forecast_tracker.py: update_bias_from_openmeteo), non più
+# ad ogni chiamata di questo endpoint — prima restava fermo per giorni se l'app
+# non apriva la schermata dettagli. Qui lo leggiamo soltanto, in sola lettura.
+from scripts.forecast_tracker import load_bias_memory
+from app.services import openmeteo
 
 
 @router.get("/{station_id}/latest")
@@ -279,32 +243,26 @@ def get_extended_forecast(station_id: str, module: str = "base"):
         lon = meta.get("longitude", 9.68)
         now = datetime.now()
 
-        # --- APPRENDIMENTO AUTOMATICO BASATO SUI ERRORI PASSATI ---
+        # --- Bias letto dallo scheduler giornaliero (temp + pressione + umidità) ---
         bias_memory = load_bias_memory()
-        learned_temp_bias = bias_memory.get("temp_bias", 0.0)
-
-        # Confronto leggero in background con Open-Meteo per autocorrezione
-        om_current = fetch_open_meteo_baseline(lat, lon)
-        if om_current and "temperature_2m" in om_current:
-            om_temp = om_current["temperature_2m"]
-            # Registriamo l'errore tra la nostra stazione grezza e Open-Meteo come verità di riferimento locale
-            update_bias_memory(current_temp, om_temp)
-
-        # Applichiamo la correzione del bias accumulato nel tempo
-        corrected_current_temp = current_temp + learned_temp_bias
+        corrected_current_temp = current_temp + bias_memory.get("temp_bias", 0.0)
+        corrected_current_pressure = current_pressure + bias_memory.get("pressure_bias", 0.0)
+        corrected_current_humidity = (
+            current_humidity + bias_memory.get("humidity_bias", 0.0) if current_humidity is not None else None
+        )
 
         # NEW — temperatura percepita sul dato corretto
-        feels_like = compute_feels_like(corrected_current_temp, current_humidity, current_wind_speed)
+        feels_like = compute_feels_like(corrected_current_temp, corrected_current_humidity, current_wind_speed)
 
         # Calcola il forecast reale (oggi + proiezione a 5 giorni) con tutti i dati disponibili
         base_forecast = compute_forecast(
             station_id=station_id,
-            pressure_station=current_pressure,
+            pressure_station=corrected_current_pressure,
             temp_now=corrected_current_temp,
             altitude_m=altitude,
             month=now.month,
             delta_3h=delta_3h,
-            humidity=current_humidity,
+            humidity=corrected_current_humidity,
             lux=current_lux,
             dt_utc=datetime.now(timezone.utc),
             latitude_deg=lat,
@@ -327,26 +285,42 @@ def get_extended_forecast(station_id: str, module: str = "base"):
             "hourlyList": _build_hourly_preview(corrected_current_temp, base_forecast["icon"], base_forecast["condition"]),
         }]
 
-        # Giorni 1-5 dalla proiezione fisica reale (extended_forecast), non più finta
+        # Giorni 1-5 dalla proiezione fisica reale (extended_forecast), non più finta.
+        # Dal giorno 3 in poi lo smorzamento locale ha ormai poco segnale (vedi
+        # forecast.py), quindi si usa direttamente Open-Meteo: condizione reale e
+        # temp min/max reali, non più un'euristica locale sulla pressione proiettata.
         for day_data in base_forecast["extended_forecast"]:
             offset = day_data["day_offset"]
             target_date = now + timedelta(days=offset)
             day_name = "Domani" if offset == 1 else days_it[target_date.weekday()]
 
-            # Stima termica approssimata dalla variazione di pressione proiettata
-            # (circa -0.3°C per hPa in meno rispetto a oggi, euristica grezza — non un
-            # modello fisico vero e proprio, serve solo a dare un numero plausibile)
-            pressure_delta_from_today = day_data["pressure_slp_estimate"] - base_forecast["pressure_slp"]
-            effective_day_temp = corrected_current_temp + pressure_delta_from_today * 0.3
-            day_range = day_data["temp_range_estimate"]
+            om_daily = openmeteo.fetch_daily_forecast(lat, lon, target_date.date()) if offset >= 3 else None
+
+            if om_daily:
+                icon = om_daily["icon"]
+                condition_label = om_daily["label"]
+                temp_min, temp_max = om_daily["temp_min"], om_daily["temp_max"]
+                confidence = 0.6  # previsione NWP reale, più affidabile della nostra persistenza smorzata
+                hourly_icon, hourly_condition = icon, om_daily["condition"]
+                effective_day_temp = (temp_min + temp_max) / 2
+            else:
+                # Fallback: stima locale (giorni 1-2, o se Open-Meteo non risponde)
+                pressure_delta_from_today = day_data["pressure_slp_estimate"] - base_forecast["pressure_slp"]
+                effective_day_temp = corrected_current_temp + pressure_delta_from_today * 0.3
+                day_range = day_data["temp_range_estimate"]
+                temp_min, temp_max = effective_day_temp - day_range, effective_day_temp + day_range * 1.1
+                icon, condition_label = day_data["icon"], day_data["label"]
+                confidence = day_data["confidence"]
+                hourly_icon, hourly_condition = icon, day_data["condition"]
 
             forecast_days.append({
                 "dayName": day_name,
-                "icon": day_data["icon"],
-                "condition": day_data["label"],
-                "tempRange": f"{int(round(effective_day_temp - day_range))}° / {int(round(effective_day_temp + day_range * 1.1))}°",
-                "confidence": day_data["confidence"],
-                "hourlyList": _build_hourly_preview(effective_day_temp, day_data["icon"], day_data["condition"]),
+                "icon": icon,
+                "condition": condition_label,
+                "tempRange": f"{int(round(temp_min))}° / {int(round(temp_max))}°",
+                "confidence": confidence,
+                "source": "open-meteo" if om_daily else "local",
+                "hourlyList": _build_hourly_preview(effective_day_temp, hourly_icon, hourly_condition),
             })
 
         return {
@@ -354,7 +328,7 @@ def get_extended_forecast(station_id: str, module: str = "base"):
             "station_id": station_id,
             "current_summary": base_forecast,
             "forecast_days": forecast_days,
-            "correction_bias_applied": learned_temp_bias  # Utile per debuggare l'apprendimento
+            "bias_applied": bias_memory  # Utile per debuggare l'apprendimento (temp/pressione/umidità)
         }
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
