@@ -143,32 +143,53 @@ const int MAX_RESET_WIFI_FALLITI_CONSECUTIVI = 3;
 int resetWifiFallitiConsecutivi = 0;
 
 // ============================================================
-// OTA (aggiornamento firmware via Wi-Fi)
+// OTA (aggiornamento firmware via Wi-Fi), attivato a comando via MQTT
 // ============================================================
-// ATTENZIONE CONSUMO: questa stazione passa la maggior parte del tempo
-// con il WiFi completamente spento (vedi vaiInLightSleepReale()).
-// Per permettere un upload OTA bisogna tenere il WiFi acceso e in
-// ascolto per una finestra di tempo ad OGNI ciclo attivo, prima di
-// andare in sleep — altrimenti un'eventuale richiesta OTA in arrivo
-// non verrebbe mai vista. Questo allunga leggermente ogni ciclo e
-// quindi il consumo medio, anche quando non si sta facendo nessun
-// aggiornamento. La finestra (OTA_LISTEN_WINDOW_MS) è tenuta breve
-// apposta per questo. Se la stazione resta sul campo per lunghi
-// periodi senza bisogno di aggiornamenti, conviene mettere
-// OTA_ABILITATO a false per eliminare del tutto questo overhead
-// (richiede comunque un upload via USB per rimetterlo a true in
-// futuro, visto che a OTA disattivata il WiFi non resta mai acceso
-// abbastanza per riceverne uno).
+// Questa stazione passa la maggior parte del tempo con il WiFi
+// completamente spento (vedi vaiInLightSleepReale()), quindi un ascolto
+// OTA "sempre acceso" o a finestra fissa ad ogni ciclo costerebbe
+// batteria anche nei lunghissimi periodi in cui non si sta aggiornando
+// nulla. Soluzione: la stazione, appena connessa a MQTT, controlla un
+// topic di comando dedicato (messaggio RETAINED, cioè resta fisso sul
+// broker finché non lo si cambia). Se dice "on", la stazione resta
+// sveglia e in ascolto OTA finché non arriva "off" (o scatta un timeout
+// di sicurezza). Se dice "off" (il default), il ciclo prosegue identico
+// a prima: zero overhead.
+//
+// Per attivare la modalità OTA da PC (serve mosquitto_pub o un client
+// MQTT equivalente), con RETAIN attivo:
+//   mosquitto_pub -h <MQTT_HOST> -p <MQTT_PORT> --insecure \
+//     -u <MQTT_USER> -P <MQTT_PASSWORD> \
+//     -t station/<STATION_ID>/ota/comando -m on -r
+// Per disattivarla:
+//   ...stesso comando con -m off -r
+// L'opzione -r (retain) è essenziale: senza, il comando non
+// resterebbe "appeso" e la stazione non lo vedrebbe mai, dato che si
+// iscrive al topic da zero ad ogni ciclo (si disconnette e riconnette
+// a ogni ciclo, come il resto del sistema).
 const bool OTA_ABILITATO = true;
-const unsigned long OTA_LISTEN_WINDOW_MS = 2000; // finestra di ascolto OTA per ogni ciclo
+const unsigned long OTA_ATTESA_COMANDO_MS = 500;           // quanto aspettare, dopo essersi iscritti, per vedere se c'è un comando retained in attesa
+const unsigned long OTA_SESSIONE_MAX_MS = 10UL * 60UL * 1000UL; // failsafe: esce comunque dopo 10 minuti anche senza "off", per non scaricare la batteria se ci si dimentica il comando acceso
 
-// NOTA PRATICA: con un ciclo da 10-30s e una finestra di soli 2s,
-// è facile che l'invito OTA (UDP) mandato da PlatformIO arrivi
-// mentre la stazione sta già dormendo. Se "pio run -t upload" dà
-// "No response from device", è normale: riprova, il prossimo
-// tentativo ha buone probabilità di centrare la finestra successiva.
+char otaControlTopic[64];
+volatile bool modalitaOTARichiesta = false; // aggiornato dalla callback MQTT quando arriva un messaggio sul topic di comando
+volatile bool otaInCorso = false; // true durante un aggiornamento vero e proprio: in quel caso non si esce mai dal loop OTA, qualunque sia il tempo trascorso, per non interrompere il flash a metà (interromperlo non brickerebbe la scheda — l'update scrive sulla partizione OTA inattiva — ma farebbe comunque fallire l'aggiornamento).
 
-volatile bool otaInCorso = false; // true durante un aggiornamento vero e proprio: in quel caso NON si va mai in sleep, qualunque sia il tempo trascorso, per non interrompere il flash a metà (interromperlo non brickerebbe la scheda — l'update scrive sulla partizione OTA inattiva — ma farebbe comunque fallire l'aggiornamento).
+void mqttCallback(char* topic, byte* payload, unsigned int length) {
+  if (strcmp(topic, otaControlTopic) != 0) return; // per ora l'unico topic a cui siamo iscritti, ma teniamo il controllo per chiarezza/futuro
+
+  String msg;
+  msg.reserve(length);
+  for (unsigned int i = 0; i < length; i++) msg += (char)payload[i];
+  msg.trim();
+  msg.toLowerCase();
+
+  bool nuovoStato = (msg == "on" || msg == "1" || msg == "true" || msg == "start");
+  if (nuovoStato != modalitaOTARichiesta) {
+    Serial.println(nuovoStato ? "[OTA] Comando ricevuto: ENTRA in modalità OTA." : "[OTA] Comando ricevuto: ESCI da modalità OTA.");
+  }
+  modalitaOTARichiesta = nuovoStato;
+}
 
 void setupOTA() {
   ArduinoOTA.setHostname(STATION_ID);
@@ -207,31 +228,45 @@ void setupOTA() {
   ArduinoOTA.begin();
 }
 
-// Da chiamare ad ogni ciclo, subito dopo che il WiFi è connesso e PRIMA
-// di andare in sleep. Riavvia ArduinoOTA da zero ogni volta (coerente
-// col resto del firmware: anche WiFi e MQTT si ri-inizializzano
-// completamente ad ogni ciclo, visto che il radio viene spento del
-// tutto durante il sonno). Ascolta per una finestra breve; se un
-// aggiornamento viene davvero avviato, resta in ascolto SENZA LIMITE DI
-// TEMPO finché non finisce (successo o errore), per non rischiare di
-// spegnere il WiFi a metà trasferimento.
-void ascoltaOTA() {
+// Da chiamare ad ogni ciclo, subito dopo essersi connessi a MQTT e
+// PRIMA di pubblicare qualunque dato. Si iscrive al topic di comando,
+// aspetta brevemente l'eventuale messaggio retained, e se dice "on"
+// entra in modalità OTA: resta lì, servendo sia ArduinoOTA.handle() che
+// mqtt.loop() (per continuare a ricevere un eventuale "off" e non far
+// scadere il keepalive), finché la modalità non viene disattivata o
+// scatta il timeout di sicurezza. Se dice "off", ritorna quasi subito e
+// il ciclo prosegue invariato.
+void gestisciOTA() {
   if (!OTA_ABILITATO) return;
+  if (!mqtt.connected()) return;
 
+  mqtt.subscribe(otaControlTopic);
+
+  unsigned long attesaInizio = millis();
+  while (millis() - attesaInizio < OTA_ATTESA_COMANDO_MS) {
+    mqtt.loop();
+    esp_task_wdt_reset();
+  }
+
+  if (!modalitaOTARichiesta) return; // nessun comando attivo, prosegui normale
+
+  Serial.println("[OTA] Modalità OTA attiva su richiesta MQTT: ascolto esteso in corso...");
   setupOTA();
 
-  unsigned long inizio = millis();
-  while (true) {
+  unsigned long inizioSessione = millis();
+  while (modalitaOTARichiesta || otaInCorso) {
     ArduinoOTA.handle();
+    if (mqtt.connected()) mqtt.loop(); // continua a servire il topic di comando (per ricevere "off") e il keepalive MQTT
     esp_task_wdt_reset();
 
-    if (otaInCorso) {
-      continue; // aggiornamento in corso: ignora la finestra di tempo, continua finché non termina
-    }
-    if (millis() - inizio >= OTA_LISTEN_WINDOW_MS) {
+    if (!otaInCorso && (millis() - inizioSessione >= OTA_SESSIONE_MAX_MS)) {
+      Serial.println("[OTA] Timeout di sicurezza (10 min) raggiunto: esco automaticamente dalla modalità OTA.");
+      modalitaOTARichiesta = false;
       break;
     }
   }
+
+  Serial.println("[OTA] Uscita dalla modalità OTA, riprendo il normale funzionamento.");
 }
 
 WiFiClientSecure wifiClient;
@@ -767,6 +802,9 @@ void setup() {
   mqtt.setBufferSize(512);
   mqtt.setSocketTimeout(10);
   mqtt.setKeepAlive(15);
+
+  snprintf(otaControlTopic, sizeof(otaControlTopic), "station/%s/ota/comando", STATION_ID);
+  mqtt.setCallback(mqttCallback);
 }
 
 void loop() {
@@ -775,12 +813,11 @@ void loop() {
   unsigned long cycleStart = millis();
 
   bool wifiOk = connectWifiCompleto();
-
-  if (wifiOk) {
-    ascoltaOTA(); // finestra di ascolto OTA — vedi commenti nella sezione OTA sopra
-  }
-
   bool mqttOk = wifiOk && connectMqtt();
+
+  if (mqttOk) {
+    gestisciOTA(); // controlla subito il comando OTA via MQTT, prima di pubblicare qualunque dato
+  }
 
   if (!wifiOk) {
     riconnessioniConsecutiveFallite++;
