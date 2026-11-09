@@ -18,6 +18,8 @@
 #include "esp_sleep.h"
 #include <Adafruit_NeoPixel.h>
 #include "esp_task_wdt.h"
+#include <ArduinoOTA.h>
+#include <ESPmDNS.h>
 
 const int RGB_LED_PIN = 48;
 Adafruit_NeoPixel rgbLed(1, RGB_LED_PIN, NEO_GRB + NEO_KHZ800);
@@ -78,43 +80,26 @@ const int AS3935_CS = 9;
 const int AS3935_IRQ = 7;
 
 // --- Campionamento adattivo ---
-// In condizioni stabili si campiona ogni 30s (basso consumo, sufficiente
-// per temperatura/pressione che variano lentamente). Se si rileva un
-// calo rapido di pressione o temperatura — segnale tipico di un
-// downburst/gust front o dell'arrivo di una supercella — si passa
-// automaticamente a 10s per non perdere risoluzione temporale proprio
-// nei momenti più critici, restando in modalità veloce per un periodo
-// minimo dopo l'ultimo trigger (l'evento potrebbe continuare a
-// evolvere anche dopo il primo segnale).
 const uint64_t CICLO_STABILE_US = 30000000ULL;   // 30s
 const uint64_t CICLO_VELOCE_US  = 10000000ULL;   // 10s
 const float SOGLIA_CALO_PRESSIONE_HPA_MIN = 1.0f; // hPa/min
 const float SOGLIA_CALO_TEMPERATURA_C_MIN = 1.0f; // °C/min
 const unsigned long DURATA_MODALITA_VELOCE_MS = 15UL * 60UL * 1000UL; // 15 minuti
 
-uint64_t cicloAttualeUs = CICLO_VELOCE_US; // Parte veloce: se la connessione
-                                             // al boot fallisce, i retry sono
-                                             // ogni 10s invece di aspettare
-                                             // fino a 60s. Passa a stabile
-                                             // dopo la prima finestra senza
-                                             // eventi rapidi rilevati.
-unsigned long modalitaVeloceFinoAMillis = 0; // 0 = modalità stabile attiva
+uint64_t cicloAttualeUs = CICLO_VELOCE_US;
+unsigned long modalitaVeloceFinoAMillis = 0;
 
 bool primaLetturaAdattiva = true;
 float precTemperaturaAdattiva = 0.0f;
 float precPressioneAdattivaHpa = 0.0f;
 unsigned long precTimestampAdattivoMs = 0;
 
-// Valuta se la lettura corrente indica un evento in rapida evoluzione,
-// confrontandola con la precedente e normalizzando per il tempo
-// realmente trascorso (che varia: 10s in modalità veloce, 30s in
-// stabile). Se supera le soglie, estende/attiva la modalità veloce.
 void valutaCampionamentoAdattivo(float temperaturaAttuale, float pressioneAttualeHpa) {
   unsigned long oraMs = millis();
 
   if (!primaLetturaAdattiva) {
     float deltaMinuti = (float)(oraMs - precTimestampAdattivoMs) / 60000.0f;
-    if (deltaMinuti > 0.01f) { // Evita divisioni per intervalli troppo piccoli
+    if (deltaMinuti > 0.01f) {
       float ratePressione = (pressioneAttualeHpa - precPressioneAdattivaHpa) / deltaMinuti;
       float rateTemperatura = fabs(temperaturaAttuale - precTemperaturaAdattiva) / deltaMinuti;
 
@@ -147,53 +132,107 @@ void valutaCampionamentoAdattivo(float temperaturaAttuale, float pressioneAttual
 bool timeSynchronized = false;
 uint32_t sdReadOffset = 0;
 
-// Soglia di compattazione: quando l'offset consumato (dati già inviati,
-// diventati "spazzatura" in testa al file) supera questa soglia, il
-// file viene fisicamente riscritto per liberare spazio. ATTENZIONE:
-// questa operazione riscrive tutto il file DA QUESTO PUNTO IN POI fino
-// alla fine — con backlog molto grandi (es. dopo ore/giorni offline),
-// una soglia troppo bassa fa scattare la compattazione decine di volte,
-// ognuna delle quali ricopia quasi l'intero backlog residuo (anche
-// diversi MB) solo per liberare poche centinaia di KB di spazio già
-// inviato. 5MB è un compromesso: compatta abbastanza spesso da non far
-// crescere il file all'infinito, ma abbastanza raramente da non
-// diventare il collo di bottiglia dominante durante un recupero di
-// backlog enorme (osservato: con soglia 200KB, un backlog da 19MB
-// impiegava oltre 3 minuti per singolo ciclo di compattazione).
 const uint32_t SD_COMPACT_THRESHOLD_BYTES = 5000000;
 
-// Numero massimo di cicli consecutivi in cui il socket MQTT/WiFi risulta
-// caduto prima di forzare una disconnessione WiFi completa e ripartire
-// da zero (a volte il modulo radio resta in uno stato "zombie" dopo un
-// certo numero di risvegli da light sleep: un reset periodico dello
-// stack WiFi previene questo).
 const int MAX_RICONNESSIONI_CONSECUTIVE = 6;
 int riconnessioniConsecutiveFallite = 0;
 
-// Timeout del task watchdog: se loop() non "nutre" il watchdog per più
-// di questo tempo (es. blocco per bug imprevisto, exception, deadlock),
-// l'ESP32 si riavvia da solo — equivalente automatico del pulsante
-// reset fisico. 60s dà ampio margine anche ai cicli più lunghi (es.
-// recupero backlog aggressivo, che può arrivare a ~8-9s di lavoro attivo).
-// NOTA per questa versione a light sleep reale: il timeout è più alto
-// (100s invece di 60s) perché durante esp_light_sleep_start() la CPU è
-// sospesa fino a ~58s (modalità stabile, 60s di ciclo meno overhead),
-// e il timer del watchdog potrebbe continuare a contare anche durante
-// il sonno. Un timeout troppo stretto scatenerebbe un riavvio falso
-// positivo durante un sonno legittimo, non durante un vero blocco.
 const uint32_t WATCHDOG_TIMEOUT_SEC = 100;
 
-// Se il reset completo dello stack WiFi (già tentato dopo
-// MAX_RICONNESSIONI_CONSECUTIVE fallimenti) non risolve il problema per
-// più round consecutivi, il radio potrebbe essere rimasto in uno stato
-// "bloccato" più profondo di quanto un semplice WiFi.disconnect()+begin()
-// riesca a sistemare — osservato in campo: serviva il pulsante reset
-// fisico (riavvio completo del microcontrollore) per sbloccarlo. Questa
-// soglia forza un vero esp_restart() dopo troppi round di reset WiFi
-// falliti di fila, automatizzando quello che prima richiedeva
-// l'intervento manuale.
 const int MAX_RESET_WIFI_FALLITI_CONSECUTIVI = 3;
 int resetWifiFallitiConsecutivi = 0;
+
+// ============================================================
+// OTA (aggiornamento firmware via Wi-Fi)
+// ============================================================
+// ATTENZIONE CONSUMO: questa stazione passa la maggior parte del tempo
+// con il WiFi completamente spento (vedi vaiInLightSleepReale()).
+// Per permettere un upload OTA bisogna tenere il WiFi acceso e in
+// ascolto per una finestra di tempo ad OGNI ciclo attivo, prima di
+// andare in sleep — altrimenti un'eventuale richiesta OTA in arrivo
+// non verrebbe mai vista. Questo allunga leggermente ogni ciclo e
+// quindi il consumo medio, anche quando non si sta facendo nessun
+// aggiornamento. La finestra (OTA_LISTEN_WINDOW_MS) è tenuta breve
+// apposta per questo. Se la stazione resta sul campo per lunghi
+// periodi senza bisogno di aggiornamenti, conviene mettere
+// OTA_ABILITATO a false per eliminare del tutto questo overhead
+// (richiede comunque un upload via USB per rimetterlo a true in
+// futuro, visto che a OTA disattivata il WiFi non resta mai acceso
+// abbastanza per riceverne uno).
+const bool OTA_ABILITATO = true;
+const unsigned long OTA_LISTEN_WINDOW_MS = 2000; // finestra di ascolto OTA per ogni ciclo
+
+// NOTA PRATICA: con un ciclo da 10-30s e una finestra di soli 2s,
+// è facile che l'invito OTA (UDP) mandato da PlatformIO arrivi
+// mentre la stazione sta già dormendo. Se "pio run -t upload" dà
+// "No response from device", è normale: riprova, il prossimo
+// tentativo ha buone probabilità di centrare la finestra successiva.
+
+volatile bool otaInCorso = false; // true durante un aggiornamento vero e proprio: in quel caso NON si va mai in sleep, qualunque sia il tempo trascorso, per non interrompere il flash a metà (interromperlo non brickerebbe la scheda — l'update scrive sulla partizione OTA inattiva — ma farebbe comunque fallire l'aggiornamento).
+
+void setupOTA() {
+  ArduinoOTA.setHostname(STATION_ID);
+#ifdef OTA_PASSWORD
+  ArduinoOTA.setPassword(OTA_PASSWORD);
+#endif
+
+  ArduinoOTA
+    .onStart([]() {
+      otaInCorso = true;
+      String type = (ArduinoOTA.getCommand() == U_FLASH) ? "sketch" : "filesystem";
+      Serial.println("[OTA] Inizio aggiornamento " + type + " — sleep sospeso finché non finisce.");
+    })
+    .onEnd([]() {
+      Serial.println("\n[OTA] Completato, riavvio...");
+      otaInCorso = false;
+    })
+    .onProgress([](unsigned int progress, unsigned int total) {
+      esp_task_wdt_reset(); // un trasferimento può durare più del timeout del watchdog se non lo nutriamo qui dentro
+      static unsigned long ultimaStampa = 0;
+      if (millis() - ultimaStampa > 2000) {
+        Serial.printf("[OTA] %u%%\n", (progress / (total / 100)));
+        ultimaStampa = millis();
+      }
+    })
+    .onError([](ota_error_t error) {
+      otaInCorso = false;
+      Serial.printf("[OTA] Errore [%u]: ", error);
+      if (error == OTA_AUTH_ERROR) Serial.println("autenticazione fallita");
+      else if (error == OTA_BEGIN_ERROR) Serial.println("begin fallito");
+      else if (error == OTA_CONNECT_ERROR) Serial.println("connessione fallita");
+      else if (error == OTA_RECEIVE_ERROR) Serial.println("ricezione fallita");
+      else if (error == OTA_END_ERROR) Serial.println("end fallito");
+    });
+
+  ArduinoOTA.begin();
+}
+
+// Da chiamare ad ogni ciclo, subito dopo che il WiFi è connesso e PRIMA
+// di andare in sleep. Riavvia ArduinoOTA da zero ogni volta (coerente
+// col resto del firmware: anche WiFi e MQTT si ri-inizializzano
+// completamente ad ogni ciclo, visto che il radio viene spento del
+// tutto durante il sonno). Ascolta per una finestra breve; se un
+// aggiornamento viene davvero avviato, resta in ascolto SENZA LIMITE DI
+// TEMPO finché non finisce (successo o errore), per non rischiare di
+// spegnere il WiFi a metà trasferimento.
+void ascoltaOTA() {
+  if (!OTA_ABILITATO) return;
+
+  setupOTA();
+
+  unsigned long inizio = millis();
+  while (true) {
+    ArduinoOTA.handle();
+    esp_task_wdt_reset();
+
+    if (otaInCorso) {
+      continue; // aggiornamento in corso: ignora la finestra di tempo, continua finché non termina
+    }
+    if (millis() - inizio >= OTA_LISTEN_WINDOW_MS) {
+      break;
+    }
+  }
+}
 
 WiFiClientSecure wifiClient;
 PubSubClient mqtt(wifiClient);
@@ -305,22 +344,10 @@ void trySyncTime() {
   }
 }
 
-// Connessione WiFi completa: usata solo al primo avvio o quando il radio
-// va resettato del tutto (fallback). Abilita anche il power-save del
-// modem WiFi, che è ciò che rende sostenibile tenerlo associato durante
-// il light sleep: il radio si "congela" tra un beacon interval e l'altro
-// invece di restare sempre ricevente, ma senza perdere l'associazione.
 bool connectWifiCompleto() {
   Serial.print("[WiFi] Connessione completa in corso...");
   WiFi.mode(WIFI_STA);
 
-  // NOTA: qui avevamo forzato un DNS statico esterno (8.8.8.8 / 1.1.1.1)
-  // per accorciare il ritardo di risoluzione DNS al boot. Rimosso: sul
-  // router di questa rete, le query DNS dirette verso resolver esterni
-  // sembrano essere bloccate/filtrate (comune su alcuni router ISP),
-  // causando un fallimento DNS permanente invece del solo ritardo
-  // iniziale di ~30s che si aveva usando il DNS fornito dal router via
-  // DHCP. Si torna quindi al comportamento di default (DNS del router).
   WiFi.begin(WIFI_SSID, WIFI_PASSWORD);
 
   int attempts = 0;
@@ -336,26 +363,9 @@ bool connectWifiCompleto() {
                     " (RSSI: " + String(rssi) + " dBm)");
     mostraQualitaSegnaleLed(rssi);
 
-    // Nota: qui in precedenza tentavamo esp_pm_configure() per il light
-    // sleep automatico coordinato da ESP-IDF, ma la build/core in uso
-    // non lo supporta (ESP_ERR_NOT_SUPPORTED). Passiamo quindi
-    // all'approccio manuale collaudato: disconnessione completa del
-    // WiFi prima del light sleep e riconnessione da zero al risveglio
-    // (vedi loop() e vaiInLightSleepReale()), pattern confermato
-    // funzionante da diversi utenti ESP32 con lo stesso problema.
     esp_wifi_set_ps(WIFI_PS_MIN_MODEM);
 
     trySyncTime();
-    // NOTA: qui NON azzeriamo riconnessioniConsecutiveFallite. Il WiFi
-    // può connettersi correttamente anche quando poi MQTT/DNS falliscono
-    // subito dopo (è esattamente il caso osservato in campo: WiFi
-    // sempre riuscito, ma risoluzione DNS bloccata per decine di minuti
-    // finché non si è reso necessario un riavvio fisico). Se azzerassimo
-    // qui, il contatore non arriverebbe mai alla soglia che fa scattare
-    // l'auto-riavvio (esp_restart() in loop()), perché verrebbe sempre
-    // resettato prima di poter accumulare i fallimenti MQTT. Il reset
-    // corretto avviene solo in loop() quando l'intero ciclo (WiFi+MQTT)
-    // riesce.
     return true;
   }
 
@@ -388,16 +398,6 @@ bool connectMqtt() {
   Serial.print("Fallita, errore=");
   Serial.println(mqtt.state());
 
-  // Secondo tentativo nello stesso ciclo con DNS esterno (Google/
-  // Cloudflare) al posto di quello del router. Utile su router che
-  // impiegano molto tempo a rendere operativo il proprio resolver DNS
-  // dopo una nuova associazione WiFi (osservato: 20-45s sistematici).
-  // Non sostituisce nulla in modo permanente: con l'architettura a
-  // light sleep il WiFi viene smontato e ricreato da zero ad ogni
-  // ciclo, quindi questo override si "resetta" automaticamente al
-  // ciclo successivo — sicuro anche se il router blocca il DNS esterno
-  // (in quel caso questo secondo tentativo fallisce e basta, senza
-  // lasciare alcun danno persistente).
   IPAddress ipAttuale = WiFi.localIP();
   IPAddress gatewayAttuale = WiFi.gatewayIP();
   IPAddress subnetAttuale = WiFi.subnetMask();
@@ -418,12 +418,6 @@ bool connectMqtt() {
   return false;
 }
 
-// Verifica leggera dello stato della connessione, da chiamare ad ogni
-// risveglio dal light sleep. Non fa mai un reset completo del WiFi:
-// tenta prima solo di far ripartire MQTT se il WiFi risulta ancora
-// associato (caso più comune: l'associazione WiFi sopravvive al light
-// sleep, ma il socket TCP/TLS del broker può essere stato droppato da
-// un firewall/NAT/Tailscale per inattività).
 bool assicuraConnessioneAttiva() {
   if (WiFi.status() == WL_CONNECTED) {
     if (mqtt.connected()) {
@@ -443,9 +437,6 @@ bool assicuraConnessioneAttiva() {
     riconnessioniConsecutiveFallite++;
   }
 
-  // Troppi fallimenti di fila: probabile stato "zombie" dello stack
-  // WiFi. Si forza un reset completo (disconnect + reconnect da zero)
-  // invece di continuare a tentare riconnessioni parziali inutili.
   if (riconnessioniConsecutiveFallite >= MAX_RICONNESSIONI_CONSECUTIVE) {
     Serial.println("[WiFi] Troppi fallimenti consecutivi, reset completo dello stack WiFi.");
     mqtt.disconnect();
@@ -460,14 +451,9 @@ bool assicuraConnessioneAttiva() {
     }
 
     resetWifiFallitiConsecutivi++;
-    riconnessioniConsecutiveFallite = 0; // Il prossimo round riparte da zero.
+    riconnessioniConsecutiveFallite = 0;
 
     if (resetWifiFallitiConsecutivi >= MAX_RESET_WIFI_FALLITI_CONSECUTIVI) {
-      // Anche il reset software dello stack WiFi non ha risolto per
-      // troppi round di fila: il radio è probabilmente in uno stato
-      // bloccato che solo un riavvio completo del microcontrollore può
-      // sbloccare (osservato in campo: serviva il pulsante reset
-      // fisico). esp_restart() lo automatizza.
       Serial.println("[SISTEMA] Reset WiFi ripetuti falliti troppe volte: riavvio completo del microcontrollore.");
       Serial.flush();
       delay(200);
@@ -480,66 +466,29 @@ bool assicuraConnessioneAttiva() {
   return false;
 }
 
-// --- Budget di flush ADATTIVO in base a quanto backlog resta da inviare ---
-// In condizioni normali (backlog piccolo o assente) il flush resta breve
-// e a basso consumo. Se il backlog è grande (es. dopo giorni di blackout
-// per un evento meteo estremo che ha tirato giù la linea), il budget si
-// allarga molto per recuperare aggressivamente, sfruttando il fatto che
-// la connessione MQTT è già stabile (niente più costo di handshake ad
-// ogni ciclo con l'architettura a connessione persistente). La lettura
-// live viene SEMPRE inviata prima di questo flush (vedi loop()), quindi
-// allargare questo budget non fa mai perdere un dato live: al massimo
-// allunga quel singolo ciclo, il prossimo campione arriverà con qualche
-// secondo di ritardo ma nessun dato va perso.
-const unsigned long SD_FLUSH_BUDGET_NORMALE_MS   = 600;    // backlog piccolo/assente
-const unsigned long SD_FLUSH_BUDGET_MEDIO_MS     = 3000;   // backlog moderato (minuti/poche ore)
-const unsigned long SD_FLUSH_BUDGET_AGGRESSIVO_MS = 8000;  // backlog enorme (giorni), lascia
-                                                             // comunque margine nel ciclo da 10s
-                                                             // per non bloccare mai del tutto
-const uint32_t SD_SOGLIA_BACKLOG_MEDIO_BYTES      = 50000;   // ~50KB
-const uint32_t SD_SOGLIA_BACKLOG_GRANDE_BYTES     = 500000;  // ~500KB
+const unsigned long SD_FLUSH_BUDGET_NORMALE_MS   = 600;
+const unsigned long SD_FLUSH_BUDGET_MEDIO_MS     = 3000;
+const unsigned long SD_FLUSH_BUDGET_AGGRESSIVO_MS = 8000;
+const uint32_t SD_SOGLIA_BACKLOG_MEDIO_BYTES      = 50000;
+const uint32_t SD_SOGLIA_BACKLOG_GRANDE_BYTES     = 500000;
 
 const unsigned long SD_FLUSH_DELAY_NORMALE_MS = 50;
 const unsigned long SD_FLUSH_DELAY_AGGRESSIVO_MS = 2;
 const int SD_FLUSH_MAX_ROWS_PER_CYCLE_NORMALE = 10;
 
-// Invece di cancellare /backup.jsonl quando risulta "tutto inviato", lo
-// rinomina con un timestamp e ne parte uno nuovo vuoto. Questo è un
-// margine di sicurezza: mqtt.publish() (QoS 0, "fire-and-forget")
-// conferma solo che il pacchetto è stato scritto sulla connessione
-// TCP/TLS, MAI che Mosquitto l'abbia davvero ricevuto o che
-// Telegraf/InfluxDB l'abbiano processato. Durante periodi di rete
-// instabile (DNS/Funnel flaky, come abbiamo visto più volte), è
-// possibile che alcune letture vengano marcate "inviate con successo"
-// lato stazione ma non arrivino mai a destinazione. Con la cancellazione
-// automatica, quei dati sparivano per sempre senza lasciare traccia.
-// Archiviando invece di cancellare, restano sulla SD come rete di
-// sicurezza recuperabile a mano se si notano buchi nei dati su Grafana.
-//
-// NOTA: questo consuma progressivamente più spazio sulla SD nel tempo
-// (i file archiviati non vengono mai cancellati automaticamente) — vale
-// la pena controllare/ripulire manualmente la SD ogni tanto, specie se
-// il backlog recuperato è spesso grande.
 void archiviaBacklogInveceDiCancellare() {
-  String ts = getTimestamp(); // "YYYY-MM-DD HH:MM:SS" o zeri se NTP non disponibile
+  String ts = getTimestamp();
   ts.replace(' ', '_');
   ts.replace(':', '-');
   String nomeArchivio = "/archivio_" + ts + ".jsonl";
 
   if (SD.exists(nomeArchivio)) {
-    // Timestamp duplicato (raro, capiterebbe solo se NTP non è mai
-    // sincronizzato e resta sempre "0000-00-00..."): aggiungo un
-    // suffisso basato su millis() per evitare di sovrascrivere un
-    // archivio precedente.
     nomeArchivio = "/archivio_" + ts + "_" + String(millis()) + ".jsonl";
   }
 
   if (SD.rename("/backup.jsonl", nomeArchivio.c_str())) {
     Serial.println("[SD-RECOVERY] Backlog archiviato come: " + nomeArchivio);
   } else {
-    // Se anche il rename fallisce per qualche motivo, meglio cancellare
-    // (comportamento precedente) piuttosto che lasciare un offset
-    // disallineato con un file che non si riesce a rinominare.
     Serial.println("[SD-RECOVERY] Rename archivio fallito, elimino il file.");
     SD.remove("/backup.jsonl");
   }
@@ -575,13 +524,7 @@ void svuotaCodaSD() {
   bool inModalitaStabile = (cicloAttualeUs == CICLO_STABILE_US);
 
   if (inModalitaStabile && backlogResiduo > 0) {
-    // In modalità stabile (30s), qualsiasi backlog residuo — piccolo o
-    // grande — sfrutta il tempo che altrimenti passeremmo semplicemente
-    // ad aspettare senza far nulla di utile. Non ha senso limitare
-    // questo comportamento solo ai backlog enormi: anche pochi KB
-    // rimasti, se recuperati a piccoli bocconi (10 righe/ciclo), possono
-    // impiegare decine di minuti invece di uno o due cicli.
-    const unsigned long SD_FLUSH_MARGINE_MS = 1500; // Tempo lasciato libero per lettura live + overhead del ciclo.
+    const unsigned long SD_FLUSH_MARGINE_MS = 1500;
     unsigned long budgetDisponibile = (unsigned long)(cicloAttualeUs / 1000ULL);
     budgetDisponibile = (budgetDisponibile > SD_FLUSH_MARGINE_MS) ? (budgetDisponibile - SD_FLUSH_MARGINE_MS) : SD_FLUSH_BUDGET_AGGRESSIVO_MS;
     flushBudgetMs = (budgetDisponibile > SD_FLUSH_BUDGET_AGGRESSIVO_MS) ? budgetDisponibile : SD_FLUSH_BUDGET_AGGRESSIVO_MS;
@@ -589,9 +532,6 @@ void svuotaCodaSD() {
     flushDelayMs = SD_FLUSH_DELAY_AGGRESSIVO_MS;
     Serial.printf("[SD-RECOVERY] Modalità stabile con backlog residuo: recupero esteso attivo (budget %lums).\n", flushBudgetMs);
   } else if (backlogResiduo >= SD_SOGLIA_BACKLOG_GRANDE_BYTES) {
-    // Modalità veloce con backlog enorme: restiamo più cauti (budget
-    // fisso più corto) per non ritardare troppo il prossimo campione,
-    // importante durante un evento meteo in corso.
     flushBudgetMs = SD_FLUSH_BUDGET_AGGRESSIVO_MS;
     maxRighePerCiclo = INT32_MAX;
     flushDelayMs = SD_FLUSH_DELAY_AGGRESSIVO_MS;
@@ -624,16 +564,10 @@ void svuotaCodaSD() {
       break;
     }
 
-    // Buffer fisso invece di String: readStringUntil() alloca un nuovo
-    // oggetto String (heap) ad ogni riga letta. Con centinaia di righe
-    // per ciclo in modalità di recupero backlog, questo può frammentare
-    // l'heap nel tempo. Un buffer statico riutilizzato evita del tutto
-    // queste allocazioni/deallocazioni ripetute.
     static char rigaBuf[300];
     size_t rigaLen = file.readBytesUntil('\n', rigaBuf, sizeof(rigaBuf) - 1);
     rigaBuf[rigaLen] = '\0';
 
-    // Trim manuale di eventuali spazi/CR finali (equivalente a .trim()).
     while (rigaLen > 0 && (rigaBuf[rigaLen - 1] == '\r' || rigaBuf[rigaLen - 1] == ' ' || rigaBuf[rigaLen - 1] == '\n')) {
       rigaBuf[--rigaLen] = '\0';
     }
@@ -680,9 +614,7 @@ void svuotaCodaSD() {
     static uint8_t buf[4096];
     int n;
     while ((n = src.read(buf, sizeof(buf))) > 0) {
-      esp_task_wdt_reset(); // Con file molto grandi (decine di MB) la
-                             // copia può richiedere più del timeout del
-                             // watchdog se non lo nutriamo qui dentro.
+      esp_task_wdt_reset();
       dst.write(buf, n);
     }
     src.close();
@@ -754,31 +686,7 @@ void handleDataCycle(bool mqttReady) {
   scriviSuSD(String(payload));
 }
 
-// Attesa fino al prossimo ciclo SENZA sospendere la CPU (niente
-// esp_light_sleep_start()). Il risparmio energetico arriva solo dal
-// power-save del radio WiFi (WIFI_PS_MIN_MODEM, impostato una volta in
-// connectWifiCompleto): il radio si "congela" tra un beacon e l'altro,
-// ma la CPU resta sveglia e continua a servire lo stack TCP/IP e
-// mqtt.loop() regolarmente. Questo evita il problema di sincronizzazione
-// radio osservato con il light sleep esplicito (disassociazioni cicliche
-// e socket "zombie"), al costo di un consumo medio più alto.
-// Vero light sleep: a differenza del modem sleep (CPU sempre sveglia,
-// radio in power-save), qui il WiFi viene fermato completamente e la
-// CPU stessa viene sospesa con esp_light_sleep_start(). Questo è il
-// pattern confermato funzionante da diversi utenti ESP32 con lo stesso
-// problema di instabilità che avevamo osservato tenendo il WiFi
-// associato durante il sonno: la differenza chiave è che qui NON si
-// tenta di mantenere l'associazione WiFi attraverso il sonno — viene
-// smontata pulitamente prima e ricostruita da zero al risveglio (vedi
-// loop(), che richiama connectWifiCompleto()+connectMqtt() ad ogni
-// ciclo, esattamente come se fosse un riavvio).
 void vaiInLightSleepReale(unsigned long cycleStartMillis, bool connessioneRiuscita) {
-  // Se la connessione è fallita in questo ciclo, ritentiamo velocemente
-  // (come in modalità veloce) INDIPENDENTEMENTE dalla modalità meteo:
-  // un problema di rete/DNS va ritentato spesso, non ha senso aspettare
-  // fino a 60s solo perché il meteo è stabile. La modalità meteo governa
-  // la cadenza di CAMPIONAMENTO quando la connessione funziona, non la
-  // cadenza di RETRY quando è caduta.
   uint64_t cicloEffettivoUs = connessioneRiuscita ? cicloAttualeUs : CICLO_VELOCE_US;
 
   unsigned long elapsedMs = millis() - cycleStartMillis;
@@ -791,9 +699,6 @@ void vaiInLightSleepReale(unsigned long cycleStartMillis, bool connessioneRiusci
                 (cicloAttualeUs == CICLO_VELOCE_US) ? "VELOCE 10s" : "stabile 30s",
                 connessioneRiuscita ? "" : " - RETRY RAPIDO per connessione fallita");
 
-  // Disconnessione pulita PRIMA del sonno: chiudiamo MQTT, disconnettiamo
-  // il WiFi mantenendo la configurazione (SSID/password) per un
-  // riaggancio più rapido, poi fermiamo del tutto il driver radio.
   if (mqtt.connected()) mqtt.disconnect();
   WiFi.disconnect(false);
   delay(100);
@@ -805,10 +710,6 @@ void vaiInLightSleepReale(unsigned long cycleStartMillis, bool connessioneRiusci
   esp_sleep_enable_timer_wakeup((uint64_t)sleepMs * 1000ULL);
   esp_light_sleep_start();
 
-  // Al risveglio riavviamo lo stack radio: la vera riconnessione WiFi
-  // (WiFi.begin()) avviene nel prossimo giro di loop() tramite
-  // connectWifiCompleto(), qui serve solo a rimettere in piedi il
-  // driver che avevamo fermato con esp_wifi_stop().
   esp_wifi_start();
   delay(50);
 }
@@ -817,15 +718,8 @@ void setup() {
   Serial.begin(115200);
   delay(100);
 
-  // Task watchdog: se loop() smette di "nutrirlo" per più di
-  // WATCHDOG_TIMEOUT_SEC (bug imprevisto, exception, deadlock su I2C/SPI/
-  // rete), l'ESP32 si riavvia da solo automaticamente — equivalente
-  // software del pulsante reset fisico.
-  // API legacy del watchdog (compatibile con core Arduino-ESP32 senza
-  // la struct esp_task_wdt_config_t, introdotta solo in versioni più
-  // recenti del core/ESP-IDF): timeout in secondi + flag di panic.
   esp_task_wdt_init(WATCHDOG_TIMEOUT_SEC, true);
-  esp_task_wdt_add(NULL); // Registra il task corrente (loop principale).
+  esp_task_wdt_add(NULL);
 
   Serial.println("\n--- LegmaMiteo: avvio con architettura light sleep + connessione persistente ---");
 
@@ -872,36 +766,20 @@ void setup() {
   mqtt.setServer(MQTT_HOST, MQTT_PORT);
   mqtt.setBufferSize(512);
   mqtt.setSocketTimeout(10);
-  // Keepalive più corto del default (15s invece di 60s): utile a
-  // rilevare rapidamente un socket morto durante il breve periodo di
-  // attività di ogni ciclo.
   mqtt.setKeepAlive(15);
-
-  // IMPORTANTE: con l'architettura a light sleep reale, la connessione
-  // WiFi/MQTT NON viene stabilita qui in setup(). Ogni singolo ciclo di
-  // loop() si connette da zero (vedi sopra) e si disconnette
-  // completamente prima di dormire (vedi vaiInLightSleepReale()). Se
-  // setup() si connettesse già qui, il primo giro di loop() ritenterebbe
-  // una seconda connessione sopra una sessione WiFi/TLS non ancora
-  // smontata, causando conflitti di stato (osservato in test: errori
-  // SSL anomali e blocchi). Lasciamo quindi che sia il primo loop() a
-  // occuparsene, con un WiFi/MQTT puliti fin dall'inizio.
 }
 
 void loop() {
-  esp_task_wdt_reset(); // "Nutre" il watchdog: conferma che il loop non è bloccato.
+  esp_task_wdt_reset();
 
   unsigned long cycleStart = millis();
 
-  // A differenza della versione modem sleep (connessione persistente,
-  // assicuraConnessioneAttiva() fa solo un controllo leggero), qui il
-  // WiFi è stato smontato completamente prima del sonno precedente:
-  // ogni ciclo riparte da una connessione fresca, esattamente come un
-  // mini-riavvio. Il reset completo dello stack WiFi dopo troppi
-  // fallimenti resta comunque come rete di sicurezza tramite lo stesso
-  // meccanismo di connectWifiCompleto() (che azzera il contatore dei
-  // fallimenti quando riesce).
   bool wifiOk = connectWifiCompleto();
+
+  if (wifiOk) {
+    ascoltaOTA(); // finestra di ascolto OTA — vedi commenti nella sezione OTA sopra
+  }
+
   bool mqttOk = wifiOk && connectMqtt();
 
   if (!wifiOk) {
@@ -912,10 +790,6 @@ void loop() {
     riconnessioniConsecutiveFallite++;
   }
 
-  // Stesso meccanismo di escalation della versione modem sleep: troppi
-  // cicli falliti di fila -> riavvio completo del microcontrollore
-  // (vedi discussione precedente sul caso del LED viola risolto solo
-  // dal pulsante reset fisico).
   if (riconnessioniConsecutiveFallite >= MAX_RICONNESSIONI_CONSECUTIVE) {
     resetWifiFallitiConsecutivi++;
     riconnessioniConsecutiveFallite = 0;
@@ -927,7 +801,7 @@ void loop() {
     }
   } else if (mqttOk) {
     resetWifiFallitiConsecutivi = 0;
-    riconnessioniConsecutiveFallite = 0; // Reset corretto: solo su successo COMPLETO del ciclo.
+    riconnessioniConsecutiveFallite = 0;
   }
 
   if (mqtt.connected()) mqtt.loop();
