@@ -9,8 +9,13 @@ from app.routers import stations, data
 from app.config import API_VERSION, PROJECT_NAME
 from contextlib import asynccontextmanager
 from apscheduler.schedulers.background import BackgroundScheduler
+from apscheduler.triggers.interval import IntervalTrigger
 from scripts.write_sun_times import write_sun_times_for_all_stations
-from scripts.forecast_tracker import log_forecast_snapshot, verify_due_forecasts, update_bias_from_openmeteo
+from scripts.forecast_tracker import (
+    log_forecast_snapshot, verify_due_forecasts, update_bias_from_openmeteo,
+    publish_serra_automation_job,
+)
+from app.services import mqtt_bridge
 # NB: NON "from backend.scripts..." — dentro il container /app corrisponde già
 # a backend/, quindi non esiste un package "backend" da un livello più su.
 
@@ -27,6 +32,13 @@ async def lifespan(app: FastAPI):
         write_sun_times_for_all_stations()
     except Exception as e:
         print(f"[sun_times] Errore al calcolo iniziale: {e}")
+
+    # Avvia il client MQTT persistente (thread separato): da qui in poi
+    # pubblica l'automazione serra e riceve lo stato OTA di stazione/serra
+    try:
+        mqtt_bridge.start()
+    except Exception as e:
+        print(f"[mqtt_bridge] Errore all'avvio: {e}")
 
     # Pianifica l'esecuzione automatica ogni giorno alle 00:05
     scheduler.add_job(
@@ -71,12 +83,23 @@ async def lifespan(app: FastAPI):
         replace_existing=True,
     )
 
+    # Pubblica la decisione di automazione per SegmaSirra (tetto/luci) ogni
+    # 3 minuti — a intervalli, non "cron" giornaliero: qui la reattività
+    # conta (pioggia/fulmini), non ha senso aspettare un orario fisso
+    scheduler.add_job(
+        publish_serra_automation_job,
+        IntervalTrigger(minutes=3),
+        id="publish_serra_automation",
+        replace_existing=True,
+    )
+
     scheduler.start()
 
     yield  # <-- il server gira qui
 
     # --- SHUTDOWN ---
     scheduler.shutdown()
+    mqtt_bridge.stop()
 
 
 app = FastAPI(

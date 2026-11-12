@@ -13,6 +13,7 @@ from app.services.forecast import compute_forecast
 from app.services.official_alerts import get_official_alerts_summary
 from app.models.stations_registry import get_station_meta
 from app.services.astronomy import get_sun_times, is_daylight
+from app.services.influx_queries import query_recent_values, query_day_mean, query_latest_value
 
 router = APIRouter(prefix="/data", tags=["Data"])
 

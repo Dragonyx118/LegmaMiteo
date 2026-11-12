@@ -20,6 +20,60 @@ from app.config import INFLUX_URL, INFLUX_TOKEN, INFLUX_ORG, INFLUX_BUCKET, STAT
 from app.models.stations_registry import load_registry
 from app.services.forecast import compute_forecast, sea_level_pressure
 from app.services import openmeteo
+from app.services.influx_queries import query_recent_values, query_day_mean, query_latest_value
+
+from app.services import mqtt_bridge
+from app.services.astronomy import is_daylight
+
+SERRA_SOURCE_STATION_ID = "station-001"  # quale stazione alimenta l'automazione della serra
+
+def publish_serra_automation_job():
+    """Ogni pochi minuti: calcola la condizione attuale e pubblica la decisione
+    per SegmaSirra via MQTT (tetto/luci)."""
+    registry = load_registry()
+    meta = registry.get(SERRA_SOURCE_STATION_ID)
+    if not meta:
+        return
+    lat, lon = meta.get("latitude"), meta.get("longitude")
+    altitude = meta.get("altitude", STATION_ALTITUDE_M)
+
+    client = _get_influx_client()
+    try:
+        pressure_vals = _query_recent_values(client, SERRA_SOURCE_STATION_ID, "base", "pressure", 10)
+        temp_vals = _query_recent_values(client, SERRA_SOURCE_STATION_ID, "base", "temperature", 10)
+        humidity_vals = _query_recent_values(client, SERRA_SOURCE_STATION_ID, "base", "humidity", 10)
+        pressure_3h = _query_recent_values(client, SERRA_SOURCE_STATION_ID, "base", "pressure", 180)
+        lightning_km = _query_latest_value(client, SERRA_SOURCE_STATION_ID, "base", "lightning_distance_km", 30)
+
+        if not pressure_vals or not temp_vals:
+            return
+
+        delta_3h = (pressure_3h[-1] - pressure_3h[0]) if len(pressure_3h) >= 2 else None
+        humidity_now = humidity_vals[-1] if humidity_vals else None
+
+        forecast = compute_forecast(
+            station_id=SERRA_SOURCE_STATION_ID,
+            pressure_station=pressure_vals[-1],
+            temp_now=temp_vals[-1],
+            altitude_m=altitude,
+            month=datetime.now().month,
+            delta_3h=delta_3h,
+            humidity=humidity_now,
+            lightning_distance_km=lightning_km,
+        )
+    finally:
+        client.close()
+
+    roof_should_close = forecast["condition"] in ("pioggia", "temporale", "temporale_in_corso", "temporale_avvicinamento") \
+        or forecast.get("lightning_alert", False)
+
+    mqtt_bridge.publish_serra_automation(
+        condition=forecast["condition"],
+        roof_should_close=roof_should_close,
+        lights_should_be_off=is_daylight(lat, lon),
+        lightning_alert=forecast.get("lightning_alert", False),
+    )
+    print(f"[forecast_tracker] Automazione serra pubblicata: {forecast['condition']}")
 
 PENDING_FILE = "data/forecast_predictions.json"
 ACCURACY_FILE = "data/forecast_accuracy.json"

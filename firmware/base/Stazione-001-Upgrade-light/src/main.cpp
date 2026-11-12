@@ -143,6 +143,13 @@ const int MAX_RESET_WIFI_FALLITI_CONSECUTIVI = 3;
 int resetWifiFallitiConsecutivi = 0;
 
 // ============================================================
+// Forward declaration necessaria: pubblicaStatoOta() e gestisciOTA(),
+// qui sotto, usano l'oggetto globale "mqtt", che pero' e' dichiarato
+// piu' in basso nel file. Senza questa riga il file non compila.
+// ============================================================
+extern PubSubClient mqtt;
+
+// ============================================================
 // OTA (aggiornamento firmware via Wi-Fi), attivato a comando via MQTT
 // ============================================================
 // Questa stazione passa la maggior parte del tempo con il WiFi
@@ -172,8 +179,14 @@ const unsigned long OTA_ATTESA_COMANDO_MS = 500;           // quanto aspettare, 
 const unsigned long OTA_SESSIONE_MAX_MS = 10UL * 60UL * 1000UL; // failsafe: esce comunque dopo 10 minuti anche senza "off", per non scaricare la batteria se ci si dimentica il comando acceso
 
 char otaControlTopic[64];
+char otaStatusTopic[64]; // "station/<STATION_ID>/ota/stato", costruito in setup()
 volatile bool modalitaOTARichiesta = false; // aggiornato dalla callback MQTT quando arriva un messaggio sul topic di comando
 volatile bool otaInCorso = false; // true durante un aggiornamento vero e proprio: in quel caso non si esce mai dal loop OTA, qualunque sia il tempo trascorso, per non interrompere il flash a metà (interromperlo non brickerebbe la scheda — l'update scrive sulla partizione OTA inattiva — ma farebbe comunque fallire l'aggiornamento).
+
+void pubblicaStatoOta(bool attivo) {
+  if (!mqtt.connected()) return;
+  mqtt.publish(otaStatusTopic, attivo ? "attivo" : "disattivo", true); // true = retained
+}
 
 void mqttCallback(char* topic, byte* payload, unsigned int length) {
   if (strcmp(topic, otaControlTopic) != 0) return; // per ora l'unico topic a cui siamo iscritti, ma teniamo il controllo per chiarezza/futuro
@@ -250,6 +263,7 @@ void gestisciOTA() {
 
   if (!modalitaOTARichiesta) return; // nessun comando attivo, prosegui normale
 
+  pubblicaStatoOta(true);
   Serial.println("[OTA] Modalità OTA attiva su richiesta MQTT: ascolto esteso in corso...");
   setupOTA();
 
@@ -267,6 +281,7 @@ void gestisciOTA() {
   }
 
   Serial.println("[OTA] Uscita dalla modalità OTA, riprendo il normale funzionamento.");
+  pubblicaStatoOta(false);
 }
 
 WiFiClientSecure wifiClient;
@@ -427,6 +442,7 @@ bool connectMqtt() {
   Serial.print("[MQTT] Connessione TLS in corso...");
   if (mqtt.connect(STATION_ID, MQTT_USER, MQTT_PASSWORD)) {
     Serial.println("Connesso!");
+    pubblicaStatoOta(false); // baseline: appena connessi, OTA e' sicuramente spenta
     return true;
   }
 
@@ -444,6 +460,7 @@ bool connectMqtt() {
     delay(200);
     if (mqtt.connect(STATION_ID, MQTT_USER, MQTT_PASSWORD)) {
       Serial.println("Connesso!");
+      pubblicaStatoOta(false);
       return true;
     }
     Serial.print("Fallita anche con DNS esterno, errore=");
@@ -804,6 +821,7 @@ void setup() {
   mqtt.setKeepAlive(15);
 
   snprintf(otaControlTopic, sizeof(otaControlTopic), "station/%s/ota/comando", STATION_ID);
+  snprintf(otaStatusTopic, sizeof(otaStatusTopic), "station/%s/ota/stato", STATION_ID);
   mqtt.setCallback(mqttCallback);
 }
 

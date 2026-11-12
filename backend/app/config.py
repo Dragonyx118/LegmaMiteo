@@ -16,3 +16,8 @@ STATION_ALTITUDE_M = float(os.getenv("STATION_ALTITUDE_M", 84))  # Campagnola Cr
 
 API_VERSION = "1.0.0"
 PROJECT_NAME = "LegmaMiteo Weather API"
+
+MQTT_HOST = os.getenv("MQTT_HOST", "legmamiteo-server.tail1c95b4.ts.net")
+MQTT_PORT = int(os.getenv("MQTT_PORT", 8443))
+MQTT_USER = os.getenv("MQTT_USER")       # crea un utente dedicato, es. "legmamiteo-backend"
+MQTT_PASSWORD = os.getenv("MQTT_PASSWORD")

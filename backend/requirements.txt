@@ -6,3 +6,4 @@ python-dotenv==1.0.1
 requests==2.32.3
 astral==3.2
 apscheduler==3.10.4
+paho-mqtt==2.1.0
