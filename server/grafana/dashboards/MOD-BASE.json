@@ -828,8 +828,6 @@
             }
           },
           "mappings": [],
-          "max": 1030,
-          "min": 990,
           "thresholds": {
             "mode": "absolute",
             "steps": [
