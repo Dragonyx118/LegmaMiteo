@@ -1,10 +1,10 @@
 # ============================================================
-# Crea/rigenera gli utenti MQTT "legmamiteo-backend" e "serra-esp32"
-# sul broker Mosquitto con password random, e aggiorna il .env del
-# backend con le credenziali del backend.
+# Crea/rigenera un utente MQTT sul broker Mosquitto con password
+# random. Se lo username e' "legmamiteo-backend", aggiorna anche
+# il .env del backend; per ogni altro utente (serra-esp32, un
+# osservatore per MQTT Explorer, ecc.) stampa solo le credenziali.
 #
-# Uso: modifica $EnvFilePath qui sotto col path reale del tuo
-# .env, poi lancia: .\setup_mqtt_users.ps1
+# Uso: .\setup_mqtt_user.ps1
 # ============================================================
 
 $ContainerName = "legmamiteo-mosquitto"
@@ -12,8 +12,6 @@ $PasswdFileInContainer = "/mosquitto/config/passwd"
 $EnvFilePath = "C:\Users\gianb\Desktop\Projects\LegmaMiteo\BombaRepo\LegmaMiteo\.env"
 
 function New-RandomPassword {
-    # RNGCryptoServiceProvider invece di RandomNumberGenerator::Fill, che
-    # esiste solo in .NET 6+ e non in Windows PowerShell 5.1 (.NET Framework)
     $bytes = New-Object byte[] 24
     $rng = New-Object System.Security.Cryptography.RNGCryptoServiceProvider
     $rng.GetBytes($bytes)
@@ -22,43 +20,44 @@ function New-RandomPassword {
     return $b64
 }
 
-$backendPassword = New-RandomPassword
-$serraPassword = New-RandomPassword
+$username = Read-Host "Nome utente MQTT da creare/rigenerare"
+if ([string]::IsNullOrWhiteSpace($username)) {
+    Write-Host "Nome utente vuoto, interrotto."
+    exit 1
+}
 
-Write-Host "Verifica: le due password devono essere diverse tra loro"
-Write-Host "Backend: $backendPassword"
-Write-Host "Serra:   $serraPassword"
+$password = New-RandomPassword
+
 Write-Host ""
-
-Write-Host "Creo/aggiorno l'utente 'legmamiteo-backend' sul broker..."
-docker exec $ContainerName mosquitto_passwd -b $PasswdFileInContainer "legmamiteo-backend" $backendPassword
-
-Write-Host "Creo/aggiorno l'utente 'serra-esp32' sul broker..."
-docker exec $ContainerName mosquitto_passwd -b $PasswdFileInContainer "serra-esp32" $serraPassword
+Write-Host "Creo/aggiorno l'utente '$username' sul broker..."
+docker exec $ContainerName mosquitto_passwd -b $PasswdFileInContainer $username $password
 
 Write-Host "Riavvio Mosquitto perche' rilegga gli utenti..."
 docker restart $ContainerName | Out-Null
 
-# --- Aggiorna/aggiunge le righe MQTT_USER / MQTT_PASSWORD nel .env del backend ---
-if (Test-Path $EnvFilePath) {
-    $envContent = Get-Content $EnvFilePath -Raw
-} else {
-    $envContent = ""
+if ($username -eq "legmamiteo-backend") {
+    if (Test-Path $EnvFilePath) {
+        $envContent = Get-Content $EnvFilePath -Raw
+    } else {
+        $envContent = ""
+    }
+
+    $envContent = $envContent -replace '(?m)^MQTT_USER=.*$', ''
+    $envContent = $envContent -replace '(?m)^MQTT_PASSWORD=.*$', ''
+    $envContent = $envContent.TrimEnd() + "`nMQTT_USER=legmamiteo-backend`nMQTT_PASSWORD=$password`n"
+
+    Set-Content -Path $EnvFilePath -Value $envContent -NoNewline
+
+    Write-Host ""
+    Write-Host "=== FATTO ==="
+    Write-Host "Backend -> scritto in $EnvFilePath (MQTT_USER / MQTT_PASSWORD)"
 }
-
-$envContent = $envContent -replace '(?m)^MQTT_USER=.*$', ''
-$envContent = $envContent -replace '(?m)^MQTT_PASSWORD=.*$', ''
-$envContent = $envContent.TrimEnd() + "`nMQTT_USER=legmamiteo-backend`nMQTT_PASSWORD=$backendPassword`n"
-
-Set-Content -Path $EnvFilePath -Value $envContent -NoNewline
-
-Write-Host ""
-Write-Host "=== FATTO ==="
-Write-Host "Backend -> scritto in $EnvFilePath (MQTT_USER / MQTT_PASSWORD)"
-Write-Host ""
-Write-Host "Serra -> copia questi valori a mano in SegmaSirra_main.cpp:"
-Write-Host "  SERRA_MQTT_USER     = `"serra-esp32`""
-Write-Host "  SERRA_MQTT_PASSWORD = `"$serraPassword`""
-Write-Host ""
-Write-Host "(la password della serra non puo' essere scritta automaticamente"
-Write-Host " nel firmware: va ricompilato e riflashato sull'ESP32 a mano)"
+else {
+    Write-Host ""
+    Write-Host "=== FATTO ==="
+    Write-Host "Utente:   $username"
+    Write-Host "Password: $password"
+    Write-Host ""
+    Write-Host "Se e' un dispositivo (firmware), copia i valori a mano nel codice"
+    Write-Host "e riflasha. Se e' un client come MQTT Explorer, usali per la connessione."
+}

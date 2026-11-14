@@ -39,11 +39,11 @@ def publish_serra_automation_job():
 
     client = _get_influx_client()
     try:
-        pressure_vals = _query_recent_values(client, SERRA_SOURCE_STATION_ID, "base", "pressure", 10)
-        temp_vals = _query_recent_values(client, SERRA_SOURCE_STATION_ID, "base", "temperature", 10)
-        humidity_vals = _query_recent_values(client, SERRA_SOURCE_STATION_ID, "base", "humidity", 10)
-        pressure_3h = _query_recent_values(client, SERRA_SOURCE_STATION_ID, "base", "pressure", 180)
-        lightning_km = _query_latest_value(client, SERRA_SOURCE_STATION_ID, "base", "lightning_distance_km", 30)
+        pressure_vals = query_recent_values(client, SERRA_SOURCE_STATION_ID, "base", "pressure", 10)
+        temp_vals = query_recent_values(client, SERRA_SOURCE_STATION_ID, "base", "temperature", 10)
+        humidity_vals = query_recent_values(client, SERRA_SOURCE_STATION_ID, "base", "humidity", 10)
+        pressure_3h = query_recent_values(client, SERRA_SOURCE_STATION_ID, "base", "pressure", 180)
+        lightning_km = query_latest_value(client, SERRA_SOURCE_STATION_ID, "base", "lightning_distance_km", 30)
 
         if not pressure_vals or not temp_vals:
             return
